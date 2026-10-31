@@ -4,35 +4,147 @@
   "title": "Fluide microscopique",
   "description": "Simulation de fluide en temps réel : encres, taches à motif cellulaire (réaction-diffusion) et gouttes d'huile qui passent par 4 états de couleur. Le liquide suit la souris.",
   "preview": "preview.jpg",
-  "tags": ["Abstract"],
+  "tags": [
+    "Abstract"
+  ],
   "general": {
     "supportsaudioprocessing": false,
     "properties": {
       "phase": {
-        "order": 0, "text": "État", "type": "combo", "value": "-1",
+        "order": 0,
+        "text": "État",
+        "type": "combo",
+        "value": "-1",
         "options": [
-          { "label": "Cycle automatique", "value": "-1" },
-          { "label": "Corail irisé", "value": "0" },
-          { "label": "Encre rose", "value": "1" },
-          { "label": "Encre rouge", "value": "2" },
-          { "label": "Huile ambrée", "value": "3" }
+          {
+            "label": "Cycle automatique",
+            "value": "-1"
+          },
+          {
+            "label": "Corail irisé",
+            "value": "0"
+          },
+          {
+            "label": "Encre rose",
+            "value": "1"
+          },
+          {
+            "label": "Encre rouge",
+            "value": "2"
+          },
+          {
+            "label": "Huile ambrée",
+            "value": "3"
+          }
         ]
       },
-      "phaseduration": { "order": 1, "text": "Durée de chaque état (s)", "type": "slider", "min": 10, "max": 180, "value": 40, "fraction": false },
-      "speed": { "order": 2, "text": "Vitesse", "type": "slider", "min": 0, "max": 3, "value": 1, "fraction": true, "precision": 2 },
-      "mouseforce": { "order": 3, "text": "Force de la souris", "type": "slider", "min": 0, "max": 3, "value": 1, "fraction": true, "precision": 2 },
-      "mouseink": { "order": 4, "text": "La souris dépose de l'encre", "type": "bool", "value": true },
-      "blobamount": { "order": 5, "text": "Quantité de taches", "type": "slider", "min": 0, "max": 1, "value": 0.55, "fraction": true, "precision": 2 },
-      "patternscale": { "order": 6, "text": "Taille du motif", "type": "slider", "min": 1, "max": 3, "value": 1.5, "fraction": true, "precision": 1 },
-      "droplets": { "order": 7, "text": "Gouttes d'huile", "type": "slider", "min": 0, "max": 1.5, "value": 1, "fraction": true, "precision": 2 },
-      "dof": { "order": 8, "text": "Flou de profondeur", "type": "slider", "min": 0, "max": 2, "value": 1, "fraction": true, "precision": 2 },
-      "bloom": { "order": 9, "text": "Halo lumineux", "type": "slider", "min": 0, "max": 2, "value": 1, "fraction": true, "precision": 2 },
+      "phaseduration": {
+        "order": 1,
+        "text": "Durée de chaque état (s)",
+        "type": "slider",
+        "min": 10,
+        "max": 180,
+        "value": 40,
+        "fraction": false
+      },
+      "speed": {
+        "order": 2,
+        "text": "Vitesse",
+        "type": "slider",
+        "min": 0,
+        "max": 3,
+        "value": 1,
+        "fraction": true,
+        "precision": 2
+      },
+      "mouseforce": {
+        "order": 3,
+        "text": "Force de la souris",
+        "type": "slider",
+        "min": 0,
+        "max": 3,
+        "value": 1,
+        "fraction": true,
+        "precision": 2
+      },
+      "mouseink": {
+        "order": 4,
+        "text": "La souris dépose de l'encre",
+        "type": "bool",
+        "value": true
+      },
+      "blobamount": {
+        "order": 5,
+        "text": "Quantité de taches",
+        "type": "slider",
+        "min": 0,
+        "max": 1,
+        "value": 0.55,
+        "fraction": true,
+        "precision": 2
+      },
+      "patternscale": {
+        "order": 6,
+        "text": "Taille du motif",
+        "type": "slider",
+        "min": 1.5,
+        "max": 5,
+        "value": 3.0,
+        "fraction": true,
+        "precision": 1
+      },
+      "droplets": {
+        "order": 7,
+        "text": "Gouttes d'huile",
+        "type": "slider",
+        "min": 0,
+        "max": 1.5,
+        "value": 1,
+        "fraction": true,
+        "precision": 2
+      },
+      "dof": {
+        "order": 8,
+        "text": "Flou de profondeur",
+        "type": "slider",
+        "min": 0,
+        "max": 2,
+        "value": 1,
+        "fraction": true,
+        "precision": 2
+      },
+      "bloom": {
+        "order": 9,
+        "text": "Halo lumineux",
+        "type": "slider",
+        "min": 0,
+        "max": 2,
+        "value": 1,
+        "fraction": true,
+        "precision": 2
+      },
       "quality": {
-        "order": 10, "text": "Qualité", "type": "combo", "value": "1",
+        "order": 10,
+        "text": "Qualité",
+        "type": "combo",
+        "value": "-1",
         "options": [
-          { "label": "Basse", "value": "0" },
-          { "label": "Moyenne", "value": "1" },
-          { "label": "Haute", "value": "2" }
+          {
+            "label": "Auto (s'adapte à la carte graphique)",
+            "value": "-1"
+          },
+          {
+            "label": "Basse",
+            "value": "0"
+          },
+          {
+            "label": "Moyenne",
+            "value": "1"
+          },
+          {
+            "label": "Haute",
+            "value": "2"
+          }
         ]
       }
     }
