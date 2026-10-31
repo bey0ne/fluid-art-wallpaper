@@ -1,28 +1,32 @@
 # Fluide microscopique
 
-Fond d'écran animé pour [Wallpaper Engine](https://www.wallpaperengine.io/), inspiré des films de « fluid art » microscopique. Des taches couvertes de vers colorés (corail, moutarde, olive) séparés par des sillons noirs bordés de cyan flottent dans un liquide qui change d'état. Tout est calculé en temps réel en WebGL2 : aucune vidéo n'est utilisée.
+Fond d'écran animé pour [Wallpaper Engine](https://www.wallpaperengine.io/), recréé image par image à partir d'un film de « fluid art » microscopique. Une grosse goutte couverte de vers de peinture (corail, moutarde, olive), séparés par des sillons noirs traversés de fines lignes néon cyan, **suit la souris** dans le décor. Tout est calculé en temps réel en WebGL2 : aucune vidéo n'est utilisée.
 
 ![Aperçu](preview.jpg)
 
-![Le liquide suit la souris](docs/souris.jpg)
+## La goutte suit la souris
+
+- Quand la souris bouge, la goutte la suit avec un peu d'inertie. Son arrière s'étire, s'illumine en cyan et laisse une traînée d'encre orange striée de brun.
+- Elle pousse le liquide autour d'elle, ce qui fait tourbillonner les encres du décor.
+- Quand la souris ne bouge plus, la goutte dérive lentement toute seule. Le liquide qui file sous elle étire son bas vers le bas, comme dans la vidéo.
 
 ## Les 4 états
 
-Le fond d'écran passe de l'un à l'autre en continu. L'encre du nouvel état envahit progressivement l'écran.
+Le fond d'écran passe de l'un à l'autre en continu. L'encre du nouvel état envahit l'écran pendant la transition.
 
-1. **Corail irisé** : fond pêche, vers corail, moutarde et olive, sillons noirs bordés de cyan.
-2. **Encre rose** : une goutte rose brillante traverse le liquide, avec des filets d'encre brune et des lignes de lumière.
-3. **Encre rouge** : nuages d'encre rouge-orangée avec des particules sombres, sur un jaune vif.
-4. **Huile ambrée** : liquide doré, motif plus sombre et grosses gouttes d'huile à bord orangé.
+1. **Goutte corail** : fond jaune paille, vers corail, moutarde et olive, sillons noirs à lignes néon cyan.
+2. **Goutte rose et encre chocolat** : une goutte rose brillante tourne autour de la grosse goutte, des filets d'encre brune envahissent le liquide.
+3. **Encre rouge** : nuages d'encre rouge-orangée avec des particules sombres.
+4. **Huile ambrée** : liquide doré, motif en perles cernées de brun, grosses gouttes d'huile à bord orangé.
 
-Le liquide suit la souris : il est poussé, étiré, et il garde la trace de l'encre. Un clic fait apparaître une nouvelle tache.
+L'état 1 est le plus travaillé pour l'instant. Les états 2 à 4 seront rendus plus fidèles à la vidéo dans les prochaines versions.
 
 ## Installation
 
 ### Avec git (mises à jour faciles)
 
 ```
-git clone https://github.com/bey0ne/fluid-art-wallpaper "D:\Wallpaper\fluid-art-wallpaper"
+git clone -b v2-realiste https://github.com/bey0ne/fluid-art-wallpaper "D:\Wallpaper\fluid-art-wallpaper"
 ```
 
 Ensuite, reliez le dossier aux projets de Wallpaper Engine, en adaptant le chemin de Steam si besoin. Lancez cette commande dans une invite de commandes :
@@ -42,13 +46,13 @@ Téléchargez le ZIP (**Code → Download ZIP**). Dans Wallpaper Engine, ouvrez 
 | Réglage | Effet |
 | --- | --- |
 | État | Cycle automatique, ou un des 4 états fixe |
-| Durée de chaque état | En secondes |
-| Vitesse | Vitesse du mouvement du liquide |
-| Force de la souris | 0 désactive l'interaction |
-| La souris dépose de l'encre | Laisse une traînée de couleur derrière le curseur |
-| Quantité de taches | 1 à 3 taches à motif |
-| Taille du motif | Plus la valeur est grande, plus les vers sont gros (et plus c'est léger pour la carte graphique) |
-| Gouttes d'huile, Flou de profondeur, Halo lumineux | Effets de rendu |
+| Durée de chaque état | En secondes (15 par défaut) |
+| Suivi de la souris | Vitesse à laquelle la goutte rejoint le curseur ; 0 = elle dérive seule |
+| Traînée d'encre derrière la goutte | Dépose de l'encre dans le liquide quand elle bouge |
+| Taille de la goutte | Rayon de la grosse goutte |
+| Taille des vers | Plus la valeur est grande, plus les vers sont gros (et plus c'est léger pour la carte graphique) |
+| Vitesse | Vitesse du liquide, de la dérive et des transitions |
+| Gouttes d'huile, Flou de mouvement, Mouvement de caméra, Flou de profondeur, Halo lumineux | Effets de rendu |
 | Qualité | « Auto » détecte les cartes graphiques intégrées (Intel Iris, etc.) et baisse la résolution si les images saccadent |
 
 ## Aperçu dans un navigateur
@@ -57,7 +61,7 @@ Ouvrez `index.html` dans Chrome ou Edge. Les réglages se testent par l'URL, par
 
 ## Fonctionnement
 
-- **Fluide** : simulation Navier-Stokes sur GPU (advection, confinement de vorticité, projection de pression). Des émetteurs invisibles remuent le liquide et y déposent les encres.
-- **Vers** : réaction-diffusion Gray-Scott, transportée par le fluide comme une matière visqueuse. Les paramètres changent selon l'état (vers longs, puis perles).
-- **Couleur de chaque ver** : un champ de teinte tri-stable qui ne diffuse qu'à l'intérieur des vers. Chaque ver finit donc avec une seule couleur, et un sillon apparaît là où deux couleurs se touchent.
-- **Rendu** : relief de chaque ver, reflets d'un éclairage de studio, ombre portée, réfraction par la surface du liquide, gouttes d'huile en lentilles, flou de profondeur, bloom, grain.
+- **Fluide** : simulation Navier-Stokes sur GPU (advection, confinement de vorticité, projection de pression). La goutte entraîne le liquide avec elle ; des émetteurs invisibles y déposent les encres.
+- **Vers** : réaction-diffusion Gray-Scott en 32 bits, calculée dans le repère de la goutte. Près du bord, les vers deviennent des perles puis disparaissent, ce qui laisse un bord sombre.
+- **Une couleur par ver** : chaque ver reçoit une identité au hasard qui se propage le long de son cœur (la plus grande l'emporte), puis ses bords prennent l'identité du point le plus haut voisin. La couleur est tirée de cette identité.
+- **Rendu** : contours lissés en bicubique, sillons noirs avec lignes cyan aux distances régulières des vers, petites perles, reflets d'un éclairage de studio, effet dôme au bord, ombre portée teintée, traînée étirée qui s'illumine en cyan, flou de mouvement, flou de profondeur, bloom, grain.
