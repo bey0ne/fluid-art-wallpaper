@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Fluide microscopique</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #1a0802; overflow: hidden; }
-  canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
-  #err { position: fixed; inset: 0; display: none; place-items: center; color: #fff; font: 16px sans-serif; text-align: center; padding: 16px; }
+  html, body { margin: 0; height: 100%; background: #f3c27f; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #err { position: fixed; inset: 0; display: none; place-items: center; color: #222; font: 16px sans-serif; text-align: center; padding: 16px; }
 </style>
 </head>
 <body>
@@ -17,417 +17,730 @@
 (() => {
 'use strict';
 
-// ---------- Réglages (modifiables via Wallpaper Engine) ----------
+/* =====================================================================
+   Fluide microscopique v2
+   - Simulation de fluide Navier-Stokes (stable fluids) sur GPU
+   - Encres colorées transportées par le fluide
+   - Taches à motif cellulaire (réaction-diffusion Gray-Scott) transportées et étirées par le fluide
+   - 4 états qui se succèdent : corail irisé, encre rose, encre rouge, huile ambrée
+   - Rendu : relief des cellules, ombre portée, réfraction, reflets de softbox,
+     lignes caustiques, gouttes d'huile, flou de profondeur, bloom
+   ===================================================================== */
+
 const cfg = {
-  speed: 1.0,        // vitesse de l'animation ambiante
-  mouse: 1.0,        // force de la souris
-  patternScale: 1.6, // taille du motif labyrinthe (diviseur de résolution de simulation)
-  blobAmount: 0.5,   // quantité de taches à motif
-  palette: 0,        // 0 ambre, 1 océan, 2 néon
-  bubbles: true,
+  speed: 1.0,
+  mouse: 1.0,
+  mouseInk: true,
+  patternScale: 1.5,
+  blobAmount: 0.55,
+  phaseMode: -1,      // -1 = cycle automatique, sinon état fixe 0..3
+  phaseDuration: 40,  // secondes par état
+  droplets: 1.0,
+  dof: 1.0,
+  bloom: 1.0,
+  quality: 1,         // 0 bas, 1 moyen, 2 haut
   fps: 60,
 };
 
-const PALETTES = [
-  { // Ambre (proche de la vidéo)
-    bg: [[0.98,0.80,0.25],[0.96,0.55,0.10],[0.95,0.62,0.66],[0.45,0.10,0.03]],
-    stripe: [[0.98,0.85,0.20],[0.95,0.35,0.15],[0.25,0.75,0.85],[0.95,0.55,0.45]],
-    gap: [0.05,0.08,0.25],
+// ---------------- États (reconstitués image par image depuis la vidéo) ----------------
+const hex = h => [parseInt(h.slice(1,3),16)/255, parseInt(h.slice(3,5),16)/255, parseInt(h.slice(5,7),16)/255];
+const PHASES = [
+  { // 0 : corail irisé, fond pêche, contours cyan
+    base: hex('#f6c58a'), inkA: hex('#f3a35a'), inkB: hex('#c8571d'),
+    cellA: hex('#ec6a4c'), cellB: hex('#d9b236'), cellC: hex('#8a8a3c'),
+    gapA: hex('#d6a531'), gapB: hex('#7d7a35'),
+    line: hex('#0b1030'), halo: hex('#4fd2ff'), haloAmt: 1.0,
+    f: 0.0440, k: 0.0632, inv: 0, iso: 0.045, drops: 0.0, speck: 0.0, energy: 0.8, gapMix: 0.12,
   },
-  { // Océan
-    bg: [[0.20,0.70,0.85],[0.05,0.30,0.55],[0.55,0.85,0.80],[0.02,0.06,0.18]],
-    stripe: [[0.95,0.85,0.30],[0.95,0.40,0.35],[0.30,0.95,0.75],[0.90,0.95,1.00]],
-    gap: [0.02,0.04,0.12],
+  { // 1 : encre rose qui envahit, encre brune, reflets blancs
+    base: hex('#f3a9a4'), inkA: hex('#f77a96'), inkB: hex('#5a140c'),
+    cellA: hex('#ea6646'), cellB: hex('#dcbb3a'), cellC: hex('#6f7a3a'),
+    gapA: hex('#c99a2c'), gapB: hex('#2c3c5a'),
+    line: hex('#0a0f2a'), halo: hex('#62c8ff'), haloAmt: 0.9,
+    f: 0.0420, k: 0.0635, inv: 0, iso: 0.045, drops: 0.3, speck: 0.6, energy: 1.25, gapMix: 0.15,
   },
-  { // Néon
-    bg: [[0.60,0.15,0.85],[0.15,0.05,0.35],[0.95,0.25,0.60],[0.03,0.01,0.08]],
-    stripe: [[0.20,1.00,0.80],[1.00,0.90,0.20],[1.00,0.30,0.70],[0.40,0.60,1.00]],
-    gap: [0.04,0.01,0.10],
+  { // 2 : encre rouge-orangée avec particules, jaune vif
+    base: hex('#fbb21c'), inkA: hex('#e2420f'), inkB: hex('#7a1a06'),
+    cellA: hex('#ef7a3a'), cellB: hex('#e8c03a'), cellC: hex('#9a6a24'),
+    gapA: hex('#d79b2a'), gapB: hex('#4a3a2a'),
+    line: hex('#1a0d10'), halo: hex('#9fdcff'), haloAmt: 0.45,
+    f: 0.0380, k: 0.0628, inv: 0, iso: 0.05, drops: 0.55, speck: 1.0, energy: 1.1, gapMix: 0.3,
+  },
+  { // 3 : huile ambrée, grosses gouttes, contours brun foncé, vert olive
+    base: hex('#ffc400'), inkA: hex('#f39a05'), inkB: hex('#5d5a12'),
+    cellA: hex('#e86a12'), cellB: hex('#f3a91e'), cellC: hex('#c9b23a'),
+    gapA: hex('#6a6416'), gapB: hex('#3a2a08'),
+    line: hex('#1a0c02'), halo: hex('#ffd36a'), haloAmt: 0.0,
+    f: 0.0340, k: 0.0618, inv: 0, iso: 0.05, drops: 1.0, speck: 0.1, energy: 0.7, gapMix: 0.55,
   },
 ];
 
 const canvas = document.getElementById('c');
-const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, premultipliedAlpha: false });
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: false, stencil: false, premultipliedAlpha: false, preserveDrawingBuffer: false });
 if (!gl) { document.getElementById('err').style.display = 'grid'; return; }
-const hasFloat = gl.getExtension('EXT_color_buffer_float');
+const hasFloat = !!gl.getExtension('EXT_color_buffer_float');
 gl.getExtension('OES_texture_float_linear');
-const TEX_FMT = hasFloat ? { internal: gl.RGBA16F, type: gl.HALF_FLOAT } : { internal: gl.RGBA8, type: gl.UNSIGNED_BYTE };
+if (!hasFloat) { document.getElementById('err').textContent = "Votre carte graphique ne permet pas le rendu en virgule flottante."; document.getElementById('err').style.display = 'grid'; return; }
 
-// ---------- Shaders ----------
+// ---------------- Shaders ----------------
 const VERT = `#version 300 es
 in vec2 aPos; out vec2 vUv;
 void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.,1.); }`;
 
-const NOISE = `
-vec3 hash3(vec2 p){ vec3 q = vec3(dot(p,vec2(127.1,311.7)), dot(p,vec2(269.5,183.3)), dot(p,vec2(419.2,371.9))); return fract(sin(q)*43758.5453); }
-float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233)))*43758.5453); }
-float noise(vec2 p){
-  vec2 i = floor(p), f = fract(p); vec2 u = f*f*(3.-2.*f);
-  return mix(mix(hash(i), hash(i+vec2(1,0)), u.x), mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), u.x), u.y);
-}
-float fbm(vec2 p){ float s=0., a=.5; for(int i=0;i<5;i++){ s+=a*noise(p); p=p*2.03+vec2(1.7,9.2); a*=.5; } return s; }
+const HEAD = `#version 300 es
+precision highp float; precision highp sampler2D;
+in vec2 vUv; out vec4 o;
+float hash(vec2 p){ p = fract(p*vec2(443.897,441.423)); p += dot(p, p.yx+19.19); return fract((p.x+p.y)*p.x); }
+vec3 hash3(vec2 p){ vec3 q = fract(vec3(p.xyx)*vec3(.1031,.1030,.0973)); q += dot(q, q.yxz+33.33); return fract((q.xxy+q.yzz)*q.zyx); }
+float noise(vec2 p){ vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.-2.*f);
+  return mix(mix(hash(i),hash(i+vec2(1,0)),u.x), mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),u.x), u.y); }
+float fbm(vec2 p){ float s=0., a=.5; for(int i=0;i<5;i++){ s+=a*noise(p); p=mat2(1.6,1.2,-1.2,1.6)*p+vec2(3.1,7.7); a*=.5; } return s; }
+float lum(vec3 c){ return dot(c, vec3(0.299,0.587,0.114)); }
 `;
 
-// Vitesse : advection + amortissement + impulsion souris
-const VEL_FRAG = `#version 300 es
-precision highp float;
-in vec2 vUv; out vec4 o;
-uniform sampler2D uVel; uniform float uDt; uniform float uAspect;
-uniform vec2 uMouse; uniform vec2 uMouseVel; uniform float uMouseOn; uniform float uRadius;
+// --- fluide ---
+const ADVECT = HEAD + `
+uniform sampler2D uVel, uSrc; uniform vec2 uVelTexel; uniform float uDt, uDiss;
 void main(){
-  vec2 v = texture(uVel, vUv).xy;
-  vec2 back = vUv - v*uDt;
-  vec2 nv = texture(uVel, back).xy * pow(0.35, uDt);
-  vec2 d = vUv - uMouse; d.x *= uAspect;
-  float g = exp(-dot(d,d)/(uRadius*uRadius));
-  nv += uMouseVel * g * uMouseOn;
-  nv = clamp(nv, vec2(-3.), vec2(3.));
-  o = vec4(nv, 0., 1.);
+  vec2 c = vUv - uDt * texture(uVel, vUv).xy * uVelTexel;
+  o = texture(uSrc, c) / (1.0 + uDiss*uDt);
 }`;
 
-// Advection de la matière (U,V,masque) + relaxation du masque + injection souris
-const ADV_FRAG = `#version 300 es
-precision highp float;
-in vec2 vUv; out vec4 o;
-uniform sampler2D uState; uniform sampler2D uVel;
-uniform float uDt; uniform float uTime; uniform float uAspect; uniform float uSpeed;
-uniform vec2 uMouse; uniform float uMouseOn; uniform float uRadius; uniform float uBlob; uniform float uMouseMove; uniform float uRelax;
-${NOISE}
-vec2 curl(vec2 p){
-  float e = 0.01;
-  float n1 = fbm(p+vec2(0,e)), n2 = fbm(p-vec2(0,e)), n3 = fbm(p+vec2(e,0)), n4 = fbm(p-vec2(e,0));
-  return vec2(n1-n2, -(n3-n4))/(2.*e);
-}
+const FORCES = HEAD + `
+uniform sampler2D uVel; uniform float uDt, uAspect, uTime, uEnergy;
+uniform vec4 uEm[4]; uniform vec4 uEmP[4];   // pos.xy vel.xy | rayon, force, -, -
+uniform vec2 uMouse, uMouseDelta; uniform float uMouseForce, uMouseR;
 void main(){
-  vec2 p = vec2(vUv.x*uAspect, vUv.y);
-  float t = uTime*uSpeed;
-  vec2 amb = curl(p*1.3 + vec2(t*0.03, -t*0.02)) * 0.012 * uSpeed;
-  amb.x /= uAspect;
-  vec2 v = texture(uVel, vUv).xy + amb;
-  vec4 s = texture(uState, vUv - v*uDt);
-
-  // forme cible des taches : bruit lent
-  float n = fbm(p*1.6 + vec2(t*0.015, t*0.01)) + 0.35*fbm(p*4.0 - t*0.02);
-  float thr = mix(0.88, 0.55, uBlob);
-  float target = smoothstep(thr-0.06, thr+0.06, n);
-  s.b += (target - s.b) * (1. - pow(uRelax, uDt));
-
-  // la souris "peint" de la matière
+  vec2 v = texture(uVel, vUv).xy;
+  // émetteurs (comme une pipette qui remue doucement le liquide)
+  for (int i=0;i<4;i++){
+    vec2 d = vUv - uEm[i].xy; d.x *= uAspect;
+    float g = exp(-dot(d,d)/uEmP[i].x);
+    v += (uEm[i].zw - v) * g * min(1., uEmP[i].y*uDt);
+  }
+  // petits courants ambiants
+  vec2 q = vec2(vUv.x*uAspect, vUv.y)*2.0;
+  float e = 0.02;
+  float n1 = fbm(q+vec2(0,e)+uTime*0.05), n2 = fbm(q-vec2(0,e)+uTime*0.05);
+  float n3 = fbm(q+vec2(e,0)+uTime*0.05), n4 = fbm(q-vec2(e,0)+uTime*0.05);
+  v += vec2(n1-n2, -(n3-n4))/(2.*e) * 7.0 * uEnergy * uDt;
+  // souris
   vec2 d = vUv - uMouse; d.x *= uAspect;
-  float g = exp(-dot(d,d)/(uRadius*uRadius*0.6));
-  s.b = clamp(s.b + g * uMouseOn * uMouseMove * uDt * 2.5, 0., 1.);
+  v += uMouseDelta * uMouseForce * exp(-dot(d,d)/uMouseR);
+  o = vec4(v, 0., 1.);
+}`;
+
+const CURL = HEAD + `
+uniform sampler2D uVel; uniform vec2 uTexel;
+void main(){
+  float L = texture(uVel, vUv - vec2(uTexel.x,0)).y, R = texture(uVel, vUv + vec2(uTexel.x,0)).y;
+  float T = texture(uVel, vUv + vec2(0,uTexel.y)).x, B = texture(uVel, vUv - vec2(0,uTexel.y)).x;
+  o = vec4(0.5*(R - L - T + B), 0., 0., 1.);
+}`;
+
+const VORT = HEAD + `
+uniform sampler2D uVel, uCurl; uniform vec2 uTexel; uniform float uCurlAmt, uDt;
+void main(){
+  float L = texture(uCurl, vUv - vec2(uTexel.x,0)).x, R = texture(uCurl, vUv + vec2(uTexel.x,0)).x;
+  float T = texture(uCurl, vUv + vec2(0,uTexel.y)).x, B = texture(uCurl, vUv - vec2(0,uTexel.y)).x;
+  float C = texture(uCurl, vUv).x;
+  vec2 f = 0.5*vec2(abs(T)-abs(B), abs(R)-abs(L));
+  f /= length(f) + 1e-4;
+  f *= uCurlAmt * C; f.y *= -1.0;
+  vec2 v = texture(uVel, vUv).xy + f*uDt;
+  o = vec4(clamp(v, -1000., 1000.), 0., 1.);
+}`;
+
+const DIVERGENCE = HEAD + `
+uniform sampler2D uVel; uniform vec2 uTexel;
+void main(){
+  float L = texture(uVel, vUv - vec2(uTexel.x,0)).x, R = texture(uVel, vUv + vec2(uTexel.x,0)).x;
+  float T = texture(uVel, vUv + vec2(0,uTexel.y)).y, B = texture(uVel, vUv - vec2(0,uTexel.y)).y;
+  vec2 c = texture(uVel, vUv).xy;
+  if (vUv.x - uTexel.x < 0.) L = -c.x; if (vUv.x + uTexel.x > 1.) R = -c.x;
+  if (vUv.y + uTexel.y > 1.) T = -c.y; if (vUv.y - uTexel.y < 0.) B = -c.y;
+  o = vec4(0.5*(R - L + T - B), 0., 0., 1.);
+}`;
+
+const SCALE = HEAD + `
+uniform sampler2D uSrc; uniform float uValue;
+void main(){ o = texture(uSrc, vUv) * uValue; }`;
+
+const PRESSURE = HEAD + `
+uniform sampler2D uP, uDiv; uniform vec2 uTexel;
+void main(){
+  float L = texture(uP, vUv - vec2(uTexel.x,0)).x, R = texture(uP, vUv + vec2(uTexel.x,0)).x;
+  float T = texture(uP, vUv + vec2(0,uTexel.y)).x, B = texture(uP, vUv - vec2(0,uTexel.y)).x;
+  o = vec4((L + R + B + T - texture(uDiv, vUv).x)*0.25, 0., 0., 1.);
+}`;
+
+const GRADSUB = HEAD + `
+uniform sampler2D uP, uVel; uniform vec2 uTexel;
+void main(){
+  float L = texture(uP, vUv - vec2(uTexel.x,0)).x, R = texture(uP, vUv + vec2(uTexel.x,0)).x;
+  float T = texture(uP, vUv + vec2(0,uTexel.y)).x, B = texture(uP, vUv - vec2(0,uTexel.y)).x;
+  o = vec4(texture(uVel, vUv).xy - vec2(R - L, T - B), 0., 1.);
+}`;
+
+// --- encres ---
+const DYE = HEAD + `
+uniform sampler2D uVel, uDye; uniform vec2 uVelTexel; uniform float uDt, uAspect, uTime;
+uniform vec3 uBase; uniform vec3 uInk[4]; uniform vec4 uEm[4]; uniform vec4 uEmI[4]; // rayon, quantité, particules, -
+uniform vec2 uMouse; uniform float uMouseInk, uMouseR; uniform vec3 uMouseCol; uniform float uSpeck;
+void main(){
+  vec2 c = vUv - uDt * texture(uVel, vUv).xy * uVelTexel;
+  vec4 d = texture(uDye, c);
+  // l'encre se dilue très lentement dans la couleur de fond
+  d.rgb = mix(d.rgb, uBase, 1.0 - exp(-uDt*0.022));
+  d.a *= exp(-uDt*0.12);
+  for (int i=0;i<4;i++){
+    vec2 p = vUv - uEm[i].xy; p.x *= uAspect;
+    float g = exp(-dot(p,p)/uEmI[i].x);
+    // bord de nuage irrégulier
+    d.rgb = mix(d.rgb, uInk[i], clamp(g*uEmI[i].y*uDt, 0., 1.));
+    float sp = step(0.9965, hash(floor(vUv*vec2(1500.,1500./uAspect)) + floor(uTime*20.)));
+    d.a = max(d.a, sp * g * uEmI[i].z * uSpeck);
+  }
+  vec2 p = vUv - uMouse; p.x *= uAspect;
+  d.rgb = mix(d.rgb, uMouseCol, clamp(exp(-dot(p,p)/uMouseR)*uMouseInk*uDt, 0., 1.));
+  o = d;
+}`;
+
+// --- matière à motif : r=U g=V b=masque a=teinte ---
+const MAT = HEAD + `
+uniform sampler2D uVel, uMat; uniform vec2 uVelTexel; uniform float uDt, uAspect, uTime, uBlob, uRelax; uniform vec4 uCol[3];
+uniform vec2 uMouse; uniform float uClick, uMouseR;
+void main(){
+  // la matière est visqueuse : elle suit le fluide plus lentement
+  vec2 c = vUv - uDt * texture(uVel, vUv).xy * uVelTexel * 0.3;
+  vec4 s = texture(uMat, c);
+  vec2 p = vec2(vUv.x*uAspect, vUv.y);
+  // forme cible des taches (évolue très lentement, le fluide fait le reste)
+  float target = 0.;
+  for (int i=0;i<3;i++){
+    vec2 d = (vUv - uCol[i].xy) * vec2(uAspect, 1.);
+    float wob = fbm(d*3.0 + uCol[i].xy*5.0 + uTime*0.02 + float(i)*13.0) - 0.5;
+    float r = uCol[i].z * (1.0 + 0.30*wob);
+    target = max(target, smoothstep(r + 0.01, r - 0.01, length(d)) * uCol[i].w);
+  }
+  s.b += (target - s.b) * (1.0 - exp(-uDt*uRelax));
+  // anti-diffusion : garde des bords nets malgré l'advection
+  s.b += (smoothstep(0.2, 0.8, s.b) - s.b) * min(1., 3.0*uDt);
+  // clic : nouvelle tache
+  vec2 d = vUv - uMouse; d.x *= uAspect;
+  s.b = max(s.b, smoothstep(0.6, 0.2, sqrt(dot(d,d)/uMouseR)*0.25) * uClick);
+  // teinte des cellules (transportée, se renouvelle doucement)
+  float h = 0.55*fbm(p*5.0 + vec2(uTime*0.01, 3.0)) + 0.45*noise(p*26.0 + 9.0);
+  s.a += (h - s.a) * (1.0 - exp(-uDt*0.08));
   o = s;
 }`;
 
-// Réaction-diffusion Gray-Scott (motif labyrinthe)
-const RD_FRAG = `#version 300 es
-precision highp float;
-in vec2 vUv; out vec4 o;
-uniform sampler2D uState; uniform vec2 uTexel; uniform float uSeed;
+const RD = HEAD + `
+uniform sampler2D uMat; uniform vec2 uTexel; uniform float uSeed, uF, uK;
 float ihash(vec2 c, float s){
   uint h = uint(c.x)*1973u + uint(c.y)*9277u + uint(s)*26699u;
   h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16;
   return float(h) / 4294967295.0;
 }
 void main(){
-  vec4 c = texture(uState, vUv);
-  vec2 lap = -c.rg;
-  lap += 0.2*(texture(uState, vUv+vec2(uTexel.x,0)).rg + texture(uState, vUv-vec2(uTexel.x,0)).rg
-            + texture(uState, vUv+vec2(0,uTexel.y)).rg + texture(uState, vUv-vec2(0,uTexel.y)).rg);
-  lap += 0.05*(texture(uState, vUv+uTexel).rg + texture(uState, vUv-uTexel).rg
-            + texture(uState, vUv+vec2(uTexel.x,-uTexel.y)).rg + texture(uState, vUv+vec2(-uTexel.x,uTexel.y)).rg);
+  vec4 c = texture(uMat, vUv);
+  vec2 lap = -c.rg
+    + 0.2*(texture(uMat, vUv+vec2(uTexel.x,0)).rg + texture(uMat, vUv-vec2(uTexel.x,0)).rg
+         + texture(uMat, vUv+vec2(0,uTexel.y)).rg + texture(uMat, vUv-vec2(0,uTexel.y)).rg)
+    + 0.05*(texture(uMat, vUv+uTexel).rg + texture(uMat, vUv-uTexel).rg
+         + texture(uMat, vUv+vec2(uTexel.x,-uTexel.y)).rg + texture(uMat, vUv+vec2(-uTexel.x,uTexel.y)).rg);
   float U = c.r, V = c.g, m = c.b;
-  float f = 0.0545, k = 0.062 + (1.-smoothstep(0.2,0.6,m))*0.04;
+  float k = uK + (1.0 - smoothstep(0.3, 0.6, m))*0.04;
   float uvv = U*V*V;
-  U += 1.0*lap.x - uvv + f*(1.-U);
-  V += 0.5*lap.y + uvv - (k+f)*V;
-  // germes à l'intérieur des taches pour que le motif repousse
-  vec2 cellId = floor(vUv / (uTexel*5.0));
-  if (m > 0.5 && V < 0.08 && ihash(cellId, uSeed) > 0.9993) { U = 0.5; V = 0.3; }
-  o = vec4(clamp(U,0.,1.), clamp(V,0.,1.), m, 1.);
+  U += 1.0*lap.x - uvv + uF*(1.-U);
+  V += 0.5*lap.y + uvv - (k+uF)*V;
+  vec2 cell = floor(vUv / (uTexel*5.0));
+  if (m > 0.55 && V < 0.08 && ihash(cell, uSeed) > 0.998) { U = 0.5; V = 0.3; }
+  o = vec4(clamp(U,0.,1.), clamp(V,0.,1.), m, c.a);
 }`;
 
-// Rendu final
-const DISP_FRAG = `#version 300 es
-precision highp float;
-in vec2 vUv; out vec4 o;
-uniform sampler2D uState; uniform sampler2D uVel; uniform vec2 uSimTexel;
-uniform float uTime; uniform float uAspect; uniform float uSpeed; uniform float uBubbles;
-uniform vec3 uBg[4]; uniform vec3 uStripe[4]; uniform vec3 uGap;
+// --- rendu de la scène ---
+const SCENE = HEAD + `
+uniform sampler2D uDye, uMat, uVel;
+uniform vec2 uDyeTexel, uMatTexel, uVelTexel;
+uniform float uAspect, uTime, uDrops;
+uniform vec3 uCell[3]; uniform vec3 uGap[2]; uniform vec3 uLine, uHalo; uniform float uHaloAmt, uInv, uIso, uGapMix;
 uniform vec2 uMouse; uniform float uMouseOn;
-${NOISE}
 
-vec3 bgColor(vec2 p, float t){
-  vec2 q = vec2(fbm(p + t*0.02), fbm(p + vec2(5.2,1.3) - t*0.015));
-  vec2 r = vec2(fbm(p + 2.5*q + vec2(1.7,9.2) + t*0.03), fbm(p + 2.5*q + vec2(8.3,2.8)));
-  float n = fbm(p + 3.0*r);
-  vec3 col = mix(uBg[0], uBg[1], smoothstep(0.3, 0.75, n));
-  col = mix(col, uBg[2], smoothstep(0.55, 0.85, r.x) * 0.85);
-  col = mix(col, uBg[3], smoothstep(0.62, 0.9, q.y) * 0.75);
-  // filaments plus clairs
-  col += 0.12 * smoothstep(0.02, 0.0, abs(n - 0.5));
-  return col;
+const vec3 LDIR = normalize(vec3(-0.45, 0.55, 0.70));
+
+// reflet d'un grand softbox rectangulaire (comme l'éclairage de studio de la vidéo)
+float softbox(vec3 n){
+  vec3 r = reflect(vec3(0,0,-1), n);
+  vec2 a = r.xy - vec2(-0.30, 0.38);
+  float box = smoothstep(0.20, 0.17, abs(a.x)) * smoothstep(0.13, 0.10, abs(a.y));
+  vec2 b = r.xy - vec2(0.42, -0.30);
+  float box2 = smoothstep(0.08, 0.06, abs(b.x)) * smoothstep(0.16, 0.13, abs(b.y));
+  return box + 0.5*box2;
 }
 
-float height(vec2 uv){
-  vec4 s = texture(uState, uv);
-  float m = smoothstep(0.35, 0.65, s.b);
-  return m * (0.55 + 0.6*smoothstep(0.12, 0.4, s.g));
+vec3 cellPalette(float h){
+  h = fract(h*2.7);
+  vec3 c = mix(uCell[0], uCell[1], smoothstep(0.38, 0.42, h));
+  return mix(c, uCell[2], smoothstep(0.76, 0.80, h));
+}
+
+float matHeight(vec2 uv){
+  vec4 s = texture(uMat, uv);
+  float m = smoothstep(0.4, 0.6, s.b);
+  float hc = mix(smoothstep(uIso-0.04, uIso+0.18, s.g), 1.0 - smoothstep(0.24, 0.42, s.g), uInv);
+  return m * (0.5 + 0.35*hc);
 }
 
 void main(){
-  float t = uTime * uSpeed;
-  vec2 vel = texture(uVel, vUv).xy;
-  vec2 p = vec2(vUv.x*uAspect, vUv.y) * 1.8;
-  p -= vel * vec2(uAspect,1.) * 0.08;
+  vec2 uv = vUv;
+  vec2 asp = vec2(uAspect, 1.);
+  vec2 vel = texture(uVel, uv).xy * uVelTexel;
 
-  // ---- bulles / gouttelettes d'huile ----
-  vec2 lens = vec2(0.); float rim = 0.; float bubbleSpec = 0.; float inBubble = 0.;
-  if (uBubbles > 0.5) {
-    vec2 bp = vec2(vUv.x*uAspect, vUv.y) * 4.0 + vec2(t*0.05, -t*0.03) - vel*0.3;
-    vec2 cell = floor(bp);
-    for (int j=-1;j<=1;j++) for (int i=-1;i<=1;i++){
-      vec2 c = cell + vec2(i,j);
-      vec3 h = hash3(c);
-      if (h.z < 0.55) continue;
-      vec2 center = c + 0.5 + 0.35*vec2(sin(t*0.4 + h.x*6.28), cos(t*0.33 + h.y*6.28));
-      float rad = 0.12 + 0.28*h.x;
-      vec2 d = bp - center;
-      float dist = length(d);
-      float inside = smoothstep(rad, rad - 0.015, dist);
-      if (inside > 0.) {
-        float z = sqrt(max(0., 1. - (dist*dist)/(rad*rad)));
-        lens += -d/rad * (1.-z) * 0.18 * inside;
-        inBubble = max(inBubble, inside);
-        bubbleSpec = max(bubbleSpec, smoothstep(0.35, 0.0, length(d/rad - vec2(-0.35,0.4))) * inside);
+  // ---------- gouttes d'huile (lentilles) ----------
+  vec2 lens = vec2(0.); float dIn = 0., dRim = 0., dSpec = 0., dInner = 0.;
+  if (uDrops > 0.01) {
+    for (int layer=0; layer<2; layer++){
+      float sc = layer==0 ? 2.2 : 4.5;
+      vec2 bp = uv*asp*sc + vec2(uTime*0.020, -uTime*0.013)*(1.0+float(layer)) - vel*0.15;
+      vec2 cell = floor(bp);
+      for (int j=-1;j<=1;j++) for (int i=-1;i<=1;i++){
+        vec2 c = cell + vec2(i,j);
+        vec3 h = hash3(c + float(layer)*17.0);
+        float alive = smoothstep(h.z, h.z+0.08, uDrops*(layer==0 ? 0.45 : 0.35));
+        if (alive <= 0.) continue;
+        vec2 center = c + 0.5 + 0.3*vec2(sin(uTime*0.15 + h.x*6.28), cos(uTime*0.12 + h.y*6.28));
+        float rad = (0.18 + 0.30*h.x) * alive;
+        vec2 d = bp - center;
+        // légèrement ovale
+        d.x *= 1.0 + 0.25*(h.y-0.5);
+        float dist = length(d);
+        float inside = smoothstep(rad, rad - 0.02, dist);
+        if (inside > 0.) {
+          float z = sqrt(max(0., 1. - dist*dist/(rad*rad)));
+          lens += -d/rad * (1.0 - z) * inside * 0.10 / sc;
+          dIn = max(dIn, inside);
+          vec3 nn = normalize(vec3(d/rad, z*0.9));
+          dSpec = max(dSpec, smoothstep(0.93, 0.995, dot(nn, normalize(vec3(-0.45, 0.6, 0.66)))) * inside);
+          dInner = max(dInner, smoothstep(rad*0.55, rad*0.95, dist) * inside * clamp(dot(normalize(d), vec2(0.5,-0.6))*0.8+0.3, 0., 1.));
+        }
+        dRim = max(dRim, smoothstep(0.035, 0.0, abs(dist - rad)) * alive);
       }
-      rim = max(rim, smoothstep(0.03, 0.0, abs(dist - rad)) * 0.6);
     }
   }
+  vec2 suv = uv + lens / asp;
 
-  vec2 uvL = vUv + lens * vec2(1./uAspect, 1.) * 0.25;
-  vec3 col = bgColor(p + lens*1.5, t);
-  col *= 1. + inBubble*0.12;
+  // ---------- surface du liquide ----------
+  vec2 e = uDyeTexel * 2.5;
+  float lC = lum(texture(uDye, suv).rgb);
+  float lR = lum(texture(uDye, suv + vec2(e.x,0)).rgb), lL = lum(texture(uDye, suv - vec2(e.x,0)).rgb);
+  float lT = lum(texture(uDye, suv + vec2(0,e.y)).rgb), lB = lum(texture(uDye, suv - vec2(0,e.y)).rgb);
+  vec2 gl = vec2(lR - lL, lT - lB);
+  vec3 nb = normalize(vec3(-gl*9.0, 1.0));
+  vec2 ruv = suv + nb.xy * 0.006;
+  vec4 dy = texture(uDye, ruv);
+  vec3 bg = dy.rgb;
+  // l'encre épaisse est plus sombre et plus saturée
+  float thick = smoothstep(0.75, 0.25, lum(bg));
+  bg = mix(bg, bg*bg*1.1, thick*0.35);
+  // particules sombres dans l'encre
+  bg *= 1.0 - 0.75*smoothstep(0.15, 0.5, dy.a);
+  // lignes caustiques blanches aux frontières d'encre
+  float ls = (lC*2.0 + lR + lL + lT + lB)/6.0;
+  float g = length(gl)/2.0 + 1e-4;
+  float caus = 0.;
+  for (int i=0;i<2;i++){
+    float L = i==0 ? 0.62 : 0.48;
+    float dd = (ls - L) / g;      // distance en texels d'encre à l'isoligne
+    caus += exp(-dd*dd*0.5) * smoothstep(0.004, 0.02, g);
+  }
+  float bgSpec = softbox(nb);
 
-  // ---- taches à motif ----
-  vec4 s = texture(uState, uvL);
-  float m = smoothstep(0.35, 0.65, s.b);
-  float stripe = smoothstep(0.12, 0.38, s.g);
-  vec2 hp = vec2(vUv.x*uAspect, vUv.y);
-  float hn = fbm(hp*2.2 + vec2(-t*0.02, t*0.015));
-  float hn2 = fbm(hp*5.0 + 11.0);
-  vec3 sc = mix(uStripe[0], uStripe[1], smoothstep(0.35, 0.6, hn));
-  sc = mix(sc, uStripe[2], smoothstep(0.55, 0.75, hn2));
-  sc = mix(sc, uStripe[3], smoothstep(0.62, 0.8, fbm(hp*3.0 + 30.0 + t*0.01)));
-  vec3 blobCol = mix(uGap, sc, stripe);
-  // contour sombre de la tache
-  float edge = smoothstep(0.35, 0.5, s.b) * (1. - smoothstep(0.5, 0.7, s.b));
-  blobCol = mix(blobCol, uGap*0.5, edge*0.7);
+  // ---------- taches à motif ----------
+  vec4 s = texture(uMat, ruv);
+  float m = smoothstep(0.42, 0.58, s.b);
 
-  // relief et éclairage brillant
-  vec2 e = uSimTexel * 1.5;
-  float hx = height(uvL + vec2(e.x,0)) - height(uvL - vec2(e.x,0));
-  float hy = height(uvL + vec2(0,e.y)) - height(uvL - vec2(0,e.y));
-  vec3 n = normalize(vec3(-hx*2.2, -hy*2.2, 1.0));
-  vec3 L = normalize(vec3(-0.4, 0.6, 0.7));
-  float diff = clamp(dot(n, L), 0., 1.);
-  vec3 H = normalize(L + vec3(0,0,1));
-  float spec = pow(clamp(dot(n, H), 0., 1.), 60.0);
-  vec3 lit = blobCol * (0.55 + 0.6*diff) + spec * 0.9 * m;
+  // ombre portée douce
+  float sh = 0.;
+  for (int i=0;i<8;i++){
+    float a = float(i)*2.39996;
+    vec2 off = vec2(0.010, -0.018) + vec2(cos(a), sin(a))*0.010*sqrt(float(i)/8.0+0.06);
+    sh += smoothstep(0.35, 0.65, texture(uMat, ruv + off/asp*vec2(1.,1.)).b);
+  }
+  sh /= 8.0;
+  bg *= 1.0 - 0.42*sh*(1.0 - m);
 
-  col = mix(col, lit, m);
-  // ombre portée douce autour des taches
-  float shadow = smoothstep(0.1, 0.4, texture(uState, uvL + vec2(0.006, -0.01)).b) * (1.-m);
-  col *= 1. - shadow*0.25;
+  // cellules : isoligne du champ V
+  float T = uIso;
+  vec2 et = uMatTexel;
+  float vR = texture(uMat, ruv + vec2(et.x,0)).g, vL = texture(uMat, ruv - vec2(et.x,0)).g;
+  float vT = texture(uMat, ruv + vec2(0,et.y)).g, vB = texture(uMat, ruv - vec2(0,et.y)).g;
+  float gv = length(vec2(vR-vL, vT-vB))*0.5 + 1e-4;
+  float sd = (s.g - T) / gv;           // distance signée en texels
+  sd = mix(sd, -(s.g - 0.30) / gv, uInv);  // état "mousse" : cellules = trous, réseau = lignes
+  float h = s.a;
+  vec3 inside = cellPalette(h);
+  vec3 outside = mix(uLine, mix(uGap[0], uGap[1], smoothstep(0.40, 0.60, fract(h*1.7+0.3))), uGapMix);
+  // nuances internes de chaque cellule (plus sombres sur les bords)
+  inside *= 0.78 + 0.22*smoothstep(0.0, 3.0, sd);
+  vec3 bcol = sd > 0. ? inside : outside*(0.75 + 0.25*smoothstep(0., 3., -sd));
+  float line = 1.0 - smoothstep(0.35, 1.0, abs(sd));
+  float halo = exp(-pow(abs(sd) - 1.3, 2.0)*0.9) * uHaloAmt;
+  bcol = mix(bcol, uHalo, clamp(halo*0.85, 0., 1.));
+  bcol = mix(bcol, uLine, line);
 
-  // reflets de surface liquide
-  col += vec3(1.) * (rim * 0.35 + bubbleSpec * 0.6);
-  float sheen = pow(fbm(p*0.8 + vec2(t*0.04, 0.)), 3.0);
-  col += sheen * 0.25;
+  // contour de la tache
+  float edgeD = (s.b - 0.5) / (length(vec2(texture(uMat, ruv+vec2(et.x,0)).b - texture(uMat, ruv-vec2(et.x,0)).b,
+                                          texture(uMat, ruv+vec2(0,et.y)).b - texture(uMat, ruv-vec2(0,et.y)).b))*0.5 + 1e-4);
+  float mg = length(vec2(texture(uMat, ruv+vec2(et.x,0)).b - texture(uMat, ruv-vec2(et.x,0)).b,
+                         texture(uMat, ruv+vec2(0,et.y)).b - texture(uMat, ruv-vec2(0,et.y)).b));
+  float edgeOk = smoothstep(0.03, 0.12, mg);
+  float rim = exp(-edgeD*edgeD*0.35) * edgeOk;
+  float rimHalo = exp(-pow(edgeD - 2.2, 2.0)*0.25) * uHaloAmt * edgeOk;
+  bcol = mix(bcol, uLine, clamp(rim*1.1, 0., 1.) * smoothstep(-2.0, 0.5, edgeD));
+  bcol = mix(bcol, uHalo*1.1, clamp(rimHalo*0.7, 0., 1.));
 
-  // halo léger sous la souris
-  vec2 dm = vUv - uMouse; dm.x *= uAspect;
-  col += vec3(1.,0.9,0.7) * exp(-dot(dm,dm)*120.) * 0.06 * uMouseOn;
+  // relief et brillance
+  vec2 eh = uMatTexel * 1.2;
+  float hx = matHeight(ruv + vec2(eh.x,0)) - matHeight(ruv - vec2(eh.x,0));
+  float hy = matHeight(ruv + vec2(0,eh.y)) - matHeight(ruv - vec2(0,eh.y));
+  vec3 n = normalize(vec3(-hx*4.5, -hy*4.5, 1.0));
+  float diff = clamp(dot(n, LDIR), 0., 1.);
+  float spec = pow(clamp(dot(n, normalize(LDIR + vec3(0,0,1))), 0., 1.), 80.0);
+  float fres = pow(1.0 - n.z, 3.0);
+  vec3 blobLit = bcol * (0.62 + 0.55*diff) + vec3(1.0)*(spec*0.7 + softbox(n)*0.85 + fres*0.25);
 
-  // vignette + grain
-  vec2 vc = vUv - 0.5; col *= 1. - dot(vc,vc)*0.55;
-  col += (hash(vUv*1000. + fract(uTime)*50.) - 0.5) * 0.02;
-  o = vec4(pow(clamp(col,0.,1.), vec3(0.95)), 1.);
+  // ---------- composition ----------
+  vec3 col = bg * (0.92 + 0.12*nb.z);
+  col += vec3(1.0, 0.98, 0.92) * (caus*0.55 + bgSpec*0.35);
+  // halo coloré sur le fond près de la tache (irisation)
+  col = mix(col, uHalo, clamp(rimHalo*0.35*(1.0-m), 0., 1.));
+  col = mix(col, blobLit, m);
+
+  // gouttes : bord sombre, liseré lumineux intérieur, reflet net
+  if (uDrops > 0.01) {
+    col *= 1.0 - 0.10*dIn;
+    col = mix(col, col*vec3(0.55,0.33,0.10), dRim*0.75);
+    col += vec3(1.0,0.92,0.6) * dInner * 0.18;
+    col += vec3(1.0) * dSpec * 0.8;
+  }
+
+  o = vec4(min(col, vec3(1.6)), 1.0);
 }`;
 
-// ---------- utilitaires GL ----------
+// --- post-traitement : flou de profondeur, bloom, aberration, grain ---
+const POST = HEAD + `
+uniform sampler2D uScene; uniform vec2 uTexel; uniform float uTime, uAspect, uDof, uBloom;
+uniform vec2 uFocus;
+void main(){
+  vec2 d = vUv - uFocus; d.x *= uAspect;
+  float blur = clamp((length(d) - 0.32) * 1.8, 0., 1.) * uDof;
+  float r = blur * 6.0;
+  vec3 acc = vec3(0.); float wsum = 0.;
+  vec3 bloom = vec3(0.);
+  for (int i=0;i<16;i++){
+    float a = float(i)*2.39996;
+    float rr = sqrt((float(i)+0.5)/16.0);
+    vec2 off = vec2(cos(a), sin(a)) * rr;
+    vec3 c = texture(uScene, vUv + off * r * uTexel).rgb;
+    acc += c; wsum += 1.0;
+    vec3 b = texture(uScene, vUv + off * 26.0 * uTexel).rgb;
+    bloom += max(b - 0.82, 0.);
+  }
+  vec3 col = acc / wsum;
+  // aberration chromatique légère sur les bords
+  vec2 ca = (vUv - 0.5) * 0.0025;
+  col.r = mix(col.r, texture(uScene, vUv + ca).r, 0.5);
+  col.b = mix(col.b, texture(uScene, vUv - ca).b, 0.5);
+  col += bloom / 16.0 * 1.6 * uBloom;
+  // étalonnage : contraste et saturation de photo macro
+  col = clamp(col, 0., 1.);
+  col = clamp(mix(vec3(lum(col)), col, 1.12), 0., 1.);
+  col = col*col*(3.0-2.0*col)*0.25 + col*0.75;
+  vec2 v = vUv - 0.5; col *= 1.0 - dot(v,v)*0.35;
+  col += (hash(vUv*vec2(1920.,1080.) + fract(uTime*7.)*100.) - 0.5) * 0.018;
+  o = vec4(clamp(col, 0., 1.), 1.);
+}`;
+
+// ---------------- GL utilitaires ----------------
 function compile(type, src){
   const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { console.error(src.split('\n').map((l,i)=>(i+1)+': '+l).join('\n')); throw new Error(gl.getShaderInfoLog(s)); }
   return s;
 }
 function program(frag){
   const p = gl.createProgram();
   gl.attachShader(p, compile(gl.VERTEX_SHADER, VERT));
   gl.attachShader(p, compile(gl.FRAGMENT_SHADER, frag));
-  gl.bindAttribLocation(p, 0, 'aPos');
-  gl.linkProgram(p);
+  gl.bindAttribLocation(p, 0, 'aPos'); gl.linkProgram(p);
   if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
   const u = {}; const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
-  for (let i=0;i<n;i++){ const info = gl.getActiveUniform(p,i); const name = info.name.replace(/\[0\]$/,''); u[name] = gl.getUniformLocation(p, info.name); }
+  for (let i=0;i<n;i++){ const info = gl.getActiveUniform(p,i); u[info.name.replace(/\[0\]$/,'')] = gl.getUniformLocation(p, info.name); }
   return { p, u };
 }
-const progVel = program(VEL_FRAG), progAdv = program(ADV_FRAG), progRD = program(RD_FRAG), progDisp = program(DISP_FRAG);
+const P = {
+  advect: program(ADVECT), forces: program(FORCES), curl: program(CURL), vort: program(VORT),
+  div: program(DIVERGENCE), scale: program(SCALE), pressure: program(PRESSURE), grad: program(GRADSUB),
+  dye: program(DYE), mat: program(MAT), rd: program(RD), scene: program(SCENE), post: program(POST),
+};
 
 const vbo = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
-gl.enableVertexAttribArray(0);
-gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 
-function makeTarget(w, h, data){
+function target(w, h, internal, format, data){
   const tex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, tex);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  if (hasFloat) gl.texImage2D(gl.TEXTURE_2D, 0, TEX_FMT.internal, w, h, 0, gl.RGBA, gl.FLOAT, data || null);
-  else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, data ? new Uint8Array(data.map(v=>v*255)) : null);
+  gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, gl.FLOAT, data || null);
   const fbo = gl.createFramebuffer();
   gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-  return { tex, fbo, w, h };
+  if (!data) { gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT); }
+  return { tex, fbo, w, h, texel: [1/w, 1/h] };
 }
-function pair(w, h, data){ return { a: makeTarget(w,h,data), b: makeTarget(w,h,data), swap(){ const t=this.a; this.a=this.b; this.b=t; } }; }
-
-let state, vel, simW, simH, W, H;
-
-function initState(w, h){
-  const d = new Float32Array(w*h*4);
-  for (let i=0;i<w*h;i++){
-    const x=i%w, y=(i/w)|0; const blk=((x>>2)*73856093 ^ (y>>2)*19349663)>>>0; const on=(blk%97)<3; d[i*4] = on?0.5:1; d[i*4+1] = on ? 0.3 : 0; d[i*4+2] = 0; d[i*4+3] = 1;
-  }
-  return d;
+function pair(w, h, internal, format, data){
+  return { a: target(w,h,internal,format,data), b: target(w,h,internal,format,data), w, h, texel: [1/w,1/h], swap(){ const t=this.a; this.a=this.b; this.b=t; } };
 }
-
-function resize(){
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  W = Math.max(1, Math.floor(canvas.clientWidth * dpr));
-  H = Math.max(1, Math.floor(canvas.clientHeight * dpr));
-  canvas.width = W; canvas.height = H;
-  const div = Math.max(1, cfg.patternScale);
-  const nw = Math.max(64, Math.floor(canvas.clientWidth / div));
-  const nh = Math.max(64, Math.floor(canvas.clientHeight / div));
-  if (nw !== simW || nh !== simH){
-    simW = nw; simH = nh;
-    state = pair(simW, simH, initState(simW, simH));
-    vel = pair(Math.ceil(simW/2), Math.ceil(simH/2), new Float32Array(Math.ceil(simW/2)*Math.ceil(simH/2)*4));
-    warm = 120; // laisse le motif se former vite au démarrage
-  }
-}
-
-// ---------- souris ----------
-const mouse = { x: 0.5, y: 0.5, px: 0.5, py: 0.5, vx: 0, vy: 0, on: 0, lastMove: -1e9, moved: 0 };
-function onMove(cx, cy){
-  mouse.x = cx / window.innerWidth;
-  mouse.y = 1 - cy / window.innerHeight;
-  mouse.lastMove = performance.now();
-}
-window.addEventListener('mousemove', e => onMove(e.clientX, e.clientY));
-window.addEventListener('pointermove', e => onMove(e.clientX, e.clientY));
-window.addEventListener('touchmove', e => { const t = e.touches[0]; if (t) onMove(t.clientX, t.clientY); }, { passive: true });
-
-// ---------- boucle ----------
-let warm = 0, last = performance.now(), time = 0, lastDraw = 0, seed = 0;
-
-function pass(prog, target, setup){
+function pass(prog, dst, set){
   gl.useProgram(prog.p);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
-  gl.viewport(0, 0, target ? target.w : W, target ? target.h : H);
-  setup(prog.u);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, dst ? dst.fbo : null);
+  gl.viewport(0, 0, dst ? dst.w : W, dst ? dst.h : H);
+  unit = 0; set(prog.u);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
-function bindTex(unit, tex, loc){ gl.activeTexture(gl.TEXTURE0+unit); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(loc, unit); }
+let unit = 0;
+function tex(loc, t){ gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t.tex); gl.uniform1i(loc, unit); unit++; }
+
+// ---------------- ressources ----------------
+let W, H, aspect, vel, curlT, divT, pres, dye, mat, scene, matW, matH;
+const QUALITY = [ { fluid: 112, dye: 0.45, iters: 14, rd: 8 }, { fluid: 160, dye: 0.6, iters: 20, rd: 12 }, { fluid: 224, dye: 0.8, iters: 28, rd: 16 } ];
+
+function lerp3(a, b, t){ return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t]; }
+
+function build(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  W = Math.max(2, Math.floor(innerWidth * dpr)); H = Math.max(2, Math.floor(innerHeight * dpr));
+  canvas.width = W; canvas.height = H;
+  aspect = innerWidth / innerHeight;
+  const q = QUALITY[cfg.quality] || QUALITY[1];
+  const fh = q.fluid, fw = Math.round(fh * aspect);
+  vel = pair(fw, fh, gl.RG16F, gl.RG);
+  curlT = target(fw, fh, gl.R16F, gl.RED);
+  divT = target(fw, fh, gl.R16F, gl.RED);
+  pres = pair(fw, fh, gl.R16F, gl.RED);
+  const dw = Math.round(innerWidth * q.dye), dh = Math.round(innerHeight * q.dye);
+  const ph = currentPhase();
+  const dd = new Float32Array(dw*dh*4);
+  for (let i=0;i<dw*dh;i++){ dd[i*4]=ph.base[0]; dd[i*4+1]=ph.base[1]; dd[i*4+2]=ph.base[2]; dd[i*4+3]=0; }
+  dye = pair(dw, dh, gl.RGBA16F, gl.RGBA, dd);
+  matH = Math.max(96, Math.round(720 / cfg.patternScale)); matW = Math.round(matH * aspect);
+  const md = new Float32Array(matW*matH*4);
+  for (let i=0;i<matW*matH;i++){
+    const x=i%matW, y=(i/matW)|0; const blk=((x>>2)*73856093 ^ (y>>2)*19349663)>>>0; const on=(blk%97)<4;
+    md[i*4]=on?0.5:1; md[i*4+1]=on?0.3:0; md[i*4+2]=0; md[i*4+3]=Math.random();
+  }
+  mat = pair(matW, matH, gl.RGBA16F, gl.RGBA, md);
+  scene = target(W, H, gl.RGBA16F, gl.RGBA);
+  warm = 150;
+}
+
+// ---------------- états / phases ----------------
+let time = 0;
+function phaseInfo(){
+  if (cfg.phaseMode >= 0) return { i: cfg.phaseMode|0, j: cfg.phaseMode|0, t: 0 };
+  const x = time / cfg.phaseDuration;
+  const i = Math.floor(x) % PHASES.length, j = (i+1) % PHASES.length;
+  const f = x - Math.floor(x);
+  const t = f < 0.7 ? 0 : (f - 0.7) / 0.3;
+  return { i, j, t: t*t*(3-2*t), f };
+}
+function currentPhase(){
+  const { i, j, t } = phaseInfo();
+  const A = PHASES[i], B = PHASES[j], o = {};
+  for (const k in A) o[k] = Array.isArray(A[k]) ? lerp3(A[k], B[k], t) : A[k] + (B[k]-A[k])*t;
+  // l'encre injectée vient du nouvel état dès le début de la transition : c'est elle qui envahit l'écran
+  const inkPh = (phaseInfo().t > 0.0 || (phaseInfo().f||0) > 0.6) ? B : A;
+  o.inkA = inkPh.inkA; o.inkB = inkPh.inkB;
+  return o;
+}
+
+// ---------------- émetteurs (remuent et colorent le liquide) ----------------
+const EM = [0,1,2,3].map(i => ({ seed: i*1.731 + 0.37, x: 0.5, y: 0.5, px: 0.5, py: 0.5 }));
+function updateEmitters(dt){
+  for (const e of EM){
+    const t = time * 0.045 * cfg.speed + e.seed*10;
+    e.px = e.x; e.py = e.y;
+    e.x = 0.5 + 0.55*Math.sin(t*1.3 + e.seed) * Math.cos(t*0.37 + e.seed*2.0);
+    e.y = 0.5 + 0.55*Math.sin(t*0.9 + e.seed*3.1);
+  }
+}
+
+// ---------------- colonies (les grosses taches à motif) ----------------
+function colonies(){
+  const out = [], t = time * 0.012 * cfg.speed, a = cfg.blobAmount;
+  const defs = [ [0.62, 0.48, 0.30, 1], [0.18, 0.80, 0.20, a > 0.35 ? 1 : 0], [0.15, 0.15, 0.16, a > 0.6 ? 1 : 0] ];
+  defs.forEach((d, i) => {
+    const x = d[0] + 0.12*Math.sin(t*1.1 + i*2.1), y = d[1] + 0.10*Math.cos(t*0.8 + i*1.3);
+    out.push(x, y, d[2] * (0.6 + 0.7*a), d[3]);
+  });
+  return out;
+}
+
+// ---------------- souris ----------------
+const mouse = { x: 0.5, y: 0.5, px: 0.5, py: 0.5, last: -1e9, click: 0 };
+function onMove(cx, cy){ mouse.x = cx/innerWidth; mouse.y = 1 - cy/innerHeight; mouse.last = performance.now(); }
+addEventListener('mousemove', e => onMove(e.clientX, e.clientY));
+addEventListener('pointermove', e => onMove(e.clientX, e.clientY));
+addEventListener('touchmove', e => { const t=e.touches[0]; if (t) onMove(t.clientX, t.clientY); }, { passive: true });
+addEventListener('mousedown', e => { onMove(e.clientX, e.clientY); mouse.click = 1; });
+
+// ---------------- boucle ----------------
+let warm = 0, last = performance.now(), lastDraw = 0, seed = 1;
+const focus = { x: 0.5, y: 0.5 };
+
+function step(dt){
+  const q = QUALITY[cfg.quality] || QUALITY[1];
+  const ph = currentPhase();
+  const sp = cfg.speed;
+  updateEmitters(dt);
+
+  // --- vitesse ---
+  const em = new Float32Array(16), emP = new Float32Array(16), emI = new Float32Array(16), ink = [];
+  EM.forEach((e, i) => {
+    const vx = (e.x - e.px) / Math.max(dt,1e-3) * vel.w, vy = (e.y - e.py) / Math.max(dt,1e-3) * vel.h;
+    em.set([e.x, e.y, vx*1.6, vy*1.6], i*4);
+    emP.set([0.012 + 0.006*i, 0.6*ph.energy*sp, 0, 0], i*4);
+    // impulsions d'encre intermittentes
+    const pulse = Math.max(0, Math.sin(time*0.11*sp + e.seed*5.0));
+    emI.set([0.006 + 0.006*(i%2), pulse*pulse*4.0*sp, i%2 ? 1 : 0.3, 0], i*4);
+    ink.push(...(i%2 ? ph.inkB : ph.inkA));
+  });
+  const mdx = (mouse.x - mouse.px), mdy = (mouse.y - mouse.py);
+  mouse.px = mouse.x; mouse.py = mouse.y;
+  const mouseActive = performance.now() - mouse.last < 2000;
+  const mSpeed = Math.hypot(mdx, mdy) / Math.max(dt,1e-3);
+
+  pass(P.forces, vel.b, u => {
+    tex(u.uVel, vel.a);
+    gl.uniform1f(u.uDt, dt); gl.uniform1f(u.uAspect, aspect); gl.uniform1f(u.uTime, time*sp); gl.uniform1f(u.uEnergy, ph.energy*sp);
+    gl.uniform4fv(u.uEm, em); gl.uniform4fv(u.uEmP, emP);
+    gl.uniform2f(u.uMouse, mouse.x, mouse.y);
+    gl.uniform2f(u.uMouseDelta, mdx*vel.w*14, mdy*vel.h*14);
+    gl.uniform1f(u.uMouseForce, cfg.mouse); gl.uniform1f(u.uMouseR, 0.0035);
+  }); vel.swap();
+
+  pass(P.curl, curlT, u => { tex(u.uVel, vel.a); gl.uniform2fv(u.uTexel, vel.texel); });
+  pass(P.vort, vel.b, u => { tex(u.uVel, vel.a); tex(u.uCurl, curlT); gl.uniform2fv(u.uTexel, vel.texel); gl.uniform1f(u.uCurlAmt, 9); gl.uniform1f(u.uDt, dt); }); vel.swap();
+  pass(P.div, divT, u => { tex(u.uVel, vel.a); gl.uniform2fv(u.uTexel, vel.texel); });
+  pass(P.scale, pres.b, u => { tex(u.uSrc, pres.a); gl.uniform1f(u.uValue, 0.8); }); pres.swap();
+  for (let i=0;i<q.iters;i++){ pass(P.pressure, pres.b, u => { tex(u.uP, pres.a); tex(u.uDiv, divT); gl.uniform2fv(u.uTexel, vel.texel); }); pres.swap(); }
+  pass(P.grad, vel.b, u => { tex(u.uP, pres.a); tex(u.uVel, vel.a); gl.uniform2fv(u.uTexel, vel.texel); }); vel.swap();
+  pass(P.advect, vel.b, u => { tex(u.uVel, vel.a); tex(u.uSrc, vel.a); gl.uniform2fv(u.uVelTexel, vel.texel); gl.uniform1f(u.uDt, dt); gl.uniform1f(u.uDiss, 0.35); }); vel.swap();
+
+  // --- encres ---
+  pass(P.dye, dye.b, u => {
+    tex(u.uVel, vel.a); tex(u.uDye, dye.a);
+    gl.uniform2fv(u.uVelTexel, vel.texel); gl.uniform1f(u.uDt, dt); gl.uniform1f(u.uAspect, aspect); gl.uniform1f(u.uTime, time);
+    gl.uniform3fv(u.uBase, ph.base); gl.uniform3fv(u.uInk, ink); gl.uniform4fv(u.uEm, em); gl.uniform4fv(u.uEmI, emI);
+    gl.uniform2f(u.uMouse, mouse.x, mouse.y);
+    gl.uniform1f(u.uMouseInk, cfg.mouseInk && mouseActive ? Math.min(1, mSpeed*0.8) * 3.0 * Math.min(cfg.mouse, 1.5) : 0);
+    gl.uniform1f(u.uMouseR, 0.0025); gl.uniform3fv(u.uMouseCol, ph.inkA); gl.uniform1f(u.uSpeck, ph.speck);
+  }); dye.swap();
+
+  // --- matière à motif ---
+  pass(P.mat, mat.b, u => {
+    tex(u.uVel, vel.a); tex(u.uMat, mat.a);
+    gl.uniform2fv(u.uVelTexel, vel.texel); gl.uniform1f(u.uDt, dt); gl.uniform1f(u.uAspect, aspect); gl.uniform1f(u.uTime, time*sp);
+    gl.uniform1f(u.uBlob, cfg.blobAmount); gl.uniform1f(u.uRelax, warm > 0 ? 50 : 0.35);
+    gl.uniform4fv(u.uCol, colonies());
+    gl.uniform2f(u.uMouse, mouse.x, mouse.y); gl.uniform1f(u.uClick, mouse.click); gl.uniform1f(u.uMouseR, 0.004);
+  }); mat.swap();
+  mouse.click = 0;
+
+  const n = warm > 0 ? 24 : q.rd; if (warm > 0) warm--;
+  for (let i=0;i<n;i++){
+    pass(P.rd, mat.b, u => { tex(u.uMat, mat.a); gl.uniform2fv(u.uTexel, mat.texel); gl.uniform1f(u.uSeed, (seed = (seed+1) % 1e6)); gl.uniform1f(u.uF, ph.f); gl.uniform1f(u.uK, ph.k); });
+    mat.swap();
+  }
+  return ph;
+}
+
+function render(ph){
+  pass(P.scene, scene, u => {
+    tex(u.uDye, dye.a); tex(u.uMat, mat.a); tex(u.uVel, vel.a);
+    gl.uniform2fv(u.uDyeTexel, dye.texel); gl.uniform2fv(u.uMatTexel, mat.texel); gl.uniform2fv(u.uVelTexel, vel.texel);
+    gl.uniform1f(u.uAspect, aspect); gl.uniform1f(u.uTime, time*cfg.speed); gl.uniform1f(u.uDrops, ph.drops * cfg.droplets);
+    gl.uniform3fv(u.uCell, [...ph.cellA, ...ph.cellB, ...ph.cellC]); gl.uniform3fv(u.uGap, [...ph.gapA, ...ph.gapB]);
+    gl.uniform3fv(u.uLine, ph.line); gl.uniform3fv(u.uHalo, ph.halo); gl.uniform1f(u.uHaloAmt, ph.haloAmt); gl.uniform1f(u.uInv, ph.inv); gl.uniform1f(u.uIso, ph.iso); gl.uniform1f(u.uGapMix, ph.gapMix);
+  });
+  focus.x = 0.5 + 0.18*Math.sin(time*0.05); focus.y = 0.5 + 0.15*Math.cos(time*0.037);
+  pass(P.post, null, u => {
+    tex(u.uScene, scene);
+    gl.uniform2f(u.uTexel, 1/W, 1/H); gl.uniform1f(u.uTime, time); gl.uniform1f(u.uAspect, aspect);
+    gl.uniform1f(u.uDof, cfg.dof); gl.uniform1f(u.uBloom, cfg.bloom); gl.uniform2f(u.uFocus, focus.x, focus.y);
+  });
+}
 
 function frame(now){
   requestAnimationFrame(frame);
   if (cfg.fps > 0 && now - lastDraw < 1000/cfg.fps - 2) return;
   lastDraw = now;
-  const dt = Math.min(0.05, (now - last)/1000); last = now;
+  const dt = Math.min(1/30, (now - last)/1000); last = now;
   time += dt;
-  const aspect = canvas.clientWidth / canvas.clientHeight;
-
-  // vitesse de la souris (lissée)
-  const rawVx = (mouse.x - mouse.px) / Math.max(dt, 1e-3);
-  const rawVy = (mouse.y - mouse.py) / Math.max(dt, 1e-3);
-  mouse.px = mouse.x; mouse.py = mouse.y;
-  mouse.vx += (rawVx - mouse.vx) * 0.5; mouse.vy += (rawVy - mouse.vy) * 0.5;
-  const active = (now - mouse.lastMove) < 1500;
-  mouse.on += ((active ? 1 : 0) - mouse.on) * 0.08;
-  const moveAmt = Math.min(1, Math.hypot(mouse.vx, mouse.vy) * 0.8);
-  const radius = 0.09;
-  const mScale = cfg.mouse * dt * 6.0;
-
-  pass(progVel, vel.b, u => {
-    bindTex(0, vel.a.tex, u.uVel);
-    gl.uniform1f(u.uDt, dt); gl.uniform1f(u.uAspect, aspect);
-    gl.uniform2f(u.uMouse, mouse.x, mouse.y);
-    gl.uniform2f(u.uMouseVel, mouse.vx * mScale, mouse.vy * mScale);
-    gl.uniform1f(u.uMouseOn, mouse.on * (cfg.mouse > 0 ? 1 : 0));
-    gl.uniform1f(u.uRadius, radius);
-  });
-  vel.swap();
-
-  pass(progAdv, state.b, u => {
-    bindTex(0, state.a.tex, u.uState); bindTex(1, vel.a.tex, u.uVel);
-    gl.uniform1f(u.uDt, dt); gl.uniform1f(u.uTime, time); gl.uniform1f(u.uAspect, aspect);
-    gl.uniform1f(u.uSpeed, cfg.speed);
-    gl.uniform2f(u.uMouse, mouse.x, mouse.y); gl.uniform1f(u.uMouseOn, mouse.on * Math.min(cfg.mouse,1.5));
-    gl.uniform1f(u.uRadius, radius); gl.uniform1f(u.uBlob, cfg.blobAmount); gl.uniform1f(u.uMouseMove, moveAmt);
-    gl.uniform1f(u.uRelax, warm > 0 ? 0.0001 : 0.6);
-  });
-  state.swap();
-
-  const steps = warm > 0 ? 24 : 8; if (warm > 0) warm--;
-  gl.useProgram(progRD.p);
-  for (let i=0;i<steps;i++){
-    pass(progRD, state.b, u => {
-      bindTex(0, state.a.tex, u.uState);
-      gl.uniform2f(u.uTexel, 1/simW, 1/simH);
-      gl.uniform1f(u.uSeed, (seed = (seed + 1) % 100000));
-    });
-    state.swap();
-  }
-
-  const pal = PALETTES[cfg.palette] || PALETTES[0];
-  pass(progDisp, null, u => {
-    bindTex(0, state.a.tex, u.uState); bindTex(1, vel.a.tex, u.uVel);
-    gl.uniform2f(u.uSimTexel, 1/simW, 1/simH);
-    gl.uniform1f(u.uTime, time); gl.uniform1f(u.uAspect, aspect); gl.uniform1f(u.uSpeed, cfg.speed);
-    gl.uniform1f(u.uBubbles, cfg.bubbles ? 1 : 0);
-    gl.uniform3fv(u.uBg, pal.bg.flat()); gl.uniform3fv(u.uStripe, pal.stripe.flat()); gl.uniform3fv(u.uGap, pal.gap);
-    gl.uniform2f(u.uMouse, mouse.x, mouse.y); gl.uniform1f(u.uMouseOn, mouse.on * (cfg.mouse > 0 ? 1 : 0));
-  });
+  render(step(dt));
 }
 
-window.addEventListener('resize', resize);
-resize();
-requestAnimationFrame(frame);
+// pré-chauffage : laisse le motif se former avant le premier affichage
+build();
+for (let i=0;i<20;i++){ time += 1/60; step(1/60); }
+addEventListener('resize', build);
+const OFFLINE = new URLSearchParams(location.search).has('offline');
+if (!OFFLINE) requestAnimationFrame(frame);
 
-// ---------- Wallpaper Engine ----------
+// ---------------- Wallpaper Engine ----------------
+const num = (p, k, f) => { if (p[k] !== undefined) f(p[k].value); };
 window.wallpaperPropertyListener = {
   applyUserProperties(p){
-    if (p.speed) cfg.speed = p.speed.value;
-    if (p.mouseforce) cfg.mouse = p.mouseforce.value;
-    if (p.blobamount) cfg.blobAmount = p.blobamount.value;
-    if (p.palette) cfg.palette = parseInt(p.palette.value, 10) || 0;
-    if (p.bubbles) cfg.bubbles = !!p.bubbles.value;
-    if (p.patternscale){ cfg.patternScale = p.patternscale.value; simW = 0; resize(); }
+    let rebuild = false;
+    num(p, 'speed', v => cfg.speed = v);
+    num(p, 'mouseforce', v => cfg.mouse = v);
+    num(p, 'mouseink', v => cfg.mouseInk = !!v);
+    num(p, 'blobamount', v => cfg.blobAmount = v);
+    num(p, 'phase', v => cfg.phaseMode = parseInt(v, 10));
+    num(p, 'phaseduration', v => cfg.phaseDuration = Math.max(5, v));
+    num(p, 'droplets', v => cfg.droplets = v);
+    num(p, 'dof', v => cfg.dof = v);
+    num(p, 'bloom', v => cfg.bloom = v);
+    num(p, 'patternscale', v => { cfg.patternScale = v; rebuild = true; });
+    num(p, 'quality', v => { cfg.quality = parseInt(v, 10); rebuild = true; });
+    if (rebuild) build();
   },
   applyGeneralProperties(p){ if (p.fps) cfg.fps = p.fps; },
 };
 
-// Aperçu navigateur : ?palette=1&speed=1.5 ...
-const q = new URLSearchParams(location.search);
-for (const k of ['speed','mouse','patternScale','blobAmount','palette']) if (q.has(k)) cfg[k] = parseFloat(q.get(k));
-if (q.has('bubbles')) cfg.bubbles = q.get('bubbles') !== '0';
-if (q.has('patternScale')) { simW = 0; resize(); }
+// Aperçu navigateur : index.html?phase=3&speed=1.5&t=30
+const qs = new URLSearchParams(location.search);
+const qmap = { speed:'speed', mouse:'mouse', patternScale:'patternScale', blobAmount:'blobAmount', phase:'phaseMode', phaseDuration:'phaseDuration', droplets:'droplets', dof:'dof', bloom:'bloom', quality:'quality' };
+let qRebuild = false;
+for (const k in qmap) if (qs.has(k)) { cfg[qmap[k]] = parseFloat(qs.get(k)); if (k==='patternScale'||k==='quality') qRebuild = true; }
+if (qs.has('t')) time = parseFloat(qs.get('t'));
+if (qRebuild) { build(); for (let i=0;i<20;i++){ time += 1/60; step(1/60); } }
+window.__fluid = { cfg, mouse, get time(){ return time; }, set time(v){ time = v; },
+  // rendu hors ligne (tests) : avance n images puis renvoie l'image
+  run(n, dt = 1/30, mousePath){
+    let ph;
+    for (let i=0;i<n;i++){
+      if (mousePath){ const m = mousePath(i); if (m){ mouse.x = m[0]; mouse.y = m[1]; mouse.last = performance.now(); } }
+      time += dt; ph = step(dt);
+    }
+    render(ph || step(dt));
+    return canvas.toDataURL('image/jpeg', 0.9);
+  } };
 })();
 </script>
 </body>
