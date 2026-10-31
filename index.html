@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fluide microscopique</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #1a0802; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+  #err { position: fixed; inset: 0; display: none; place-items: center; color: #fff; font: 16px sans-serif; text-align: center; padding: 16px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="err">WebGL2 n'est pas disponible sur cet appareil.</div>
+<script>
+(() => {
+'use strict';
+
+// ---------- Réglages (modifiables via Wallpaper Engine) ----------
+const cfg = {
+  speed: 1.0,        // vitesse de l'animation ambiante
+  mouse: 1.0,        // force de la souris
+  patternScale: 1.6, // taille du motif labyrinthe (diviseur de résolution de simulation)
+  blobAmount: 0.5,   // quantité de taches à motif
+  palette: 0,        // 0 ambre, 1 océan, 2 néon
+  bubbles: true,
+  fps: 60,
+};
+
+const PALETTES = [
+  { // Ambre (proche de la vidéo)
+    bg: [[0.98,0.80,0.25],[0.96,0.55,0.10],[0.95,0.62,0.66],[0.45,0.10,0.03]],
+    stripe: [[0.98,0.85,0.20],[0.95,0.35,0.15],[0.25,0.75,0.85],[0.95,0.55,0.45]],
+    gap: [0.05,0.08,0.25],
+  },
+  { // Océan
+    bg: [[0.20,0.70,0.85],[0.05,0.30,0.55],[0.55,0.85,0.80],[0.02,0.06,0.18]],
+    stripe: [[0.95,0.85,0.30],[0.95,0.40,0.35],[0.30,0.95,0.75],[0.90,0.95,1.00]],
+    gap: [0.02,0.04,0.12],
+  },
+  { // Néon
+    bg: [[0.60,0.15,0.85],[0.15,0.05,0.35],[0.95,0.25,0.60],[0.03,0.01,0.08]],
+    stripe: [[0.20,1.00,0.80],[1.00,0.90,0.20],[1.00,0.30,0.70],[0.40,0.60,1.00]],
+    gap: [0.04,0.01,0.10],
+  },
+];
+
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, premultipliedAlpha: false });
+if (!gl) { document.getElementById('err').style.display = 'grid'; return; }
+const hasFloat = gl.getExtension('EXT_color_buffer_float');
+gl.getExtension('OES_texture_float_linear');
+const TEX_FMT = hasFloat ? { internal: gl.RGBA16F, type: gl.HALF_FLOAT } : { internal: gl.RGBA8, type: gl.UNSIGNED_BYTE };
+
+// ---------- Shaders ----------
+const VERT = `#version 300 es
+in vec2 aPos; out vec2 vUv;
+void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.,1.); }`;
+
+const NOISE = `
+vec3 hash3(vec2 p){ vec3 q = vec3(dot(p,vec2(127.1,311.7)), dot(p,vec2(269.5,183.3)), dot(p,vec2(419.2,371.9))); return fract(sin(q)*43758.5453); }
+float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233)))*43758.5453); }
+float noise(vec2 p){
+  vec2 i = floor(p), f = fract(p); vec2 u = f*f*(3.-2.*f);
+  return mix(mix(hash(i), hash(i+vec2(1,0)), u.x), mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), u.x), u.y);
+}
+float fbm(vec2 p){ float s=0., a=.5; for(int i=0;i<5;i++){ s+=a*noise(p); p=p*2.03+vec2(1.7,9.2); a*=.5; } return s; }
+`;
+
+// Vitesse : advection + amortissement + impulsion souris
+const VEL_FRAG = `#version 300 es
+precision highp float;
+in vec2 vUv; out vec4 o;
+uniform sampler2D uVel; uniform float uDt; uniform float uAspect;
+uniform vec2 uMouse; uniform vec2 uMouseVel; uniform float uMouseOn; uniform float uRadius;
+void main(){
+  vec2 v = texture(uVel, vUv).xy;
+  vec2 back = vUv - v*uDt;
+  vec2 nv = texture(uVel, back).xy * pow(0.35, uDt);
+  vec2 d = vUv - uMouse; d.x *= uAspect;
+  float g = exp(-dot(d,d)/(uRadius*uRadius));
+  nv += uMouseVel * g * uMouseOn;
+  nv = clamp(nv, vec2(-3.), vec2(3.));
+  o = vec4(nv, 0., 1.);
+}`;
+
+// Advection de la matière (U,V,masque) + relaxation du masque + injection souris
+const ADV_FRAG = `#version 300 es
+precision highp float;
+in vec2 vUv; out vec4 o;
+uniform sampler2D uState; uniform sampler2D uVel;
+uniform float uDt; uniform float uTime; uniform float uAspect; uniform float uSpeed;
+uniform vec2 uMouse; uniform float uMouseOn; uniform float uRadius; uniform float uBlob; uniform float uMouseMove; uniform float uRelax;
+${NOISE}
+vec2 curl(vec2 p){
+  float e = 0.01;
+  float n1 = fbm(p+vec2(0,e)), n2 = fbm(p-vec2(0,e)), n3 = fbm(p+vec2(e,0)), n4 = fbm(p-vec2(e,0));
+  return vec2(n1-n2, -(n3-n4))/(2.*e);
+}
+void main(){
+  vec2 p = vec2(vUv.x*uAspect, vUv.y);
+  float t = uTime*uSpeed;
+  vec2 amb = curl(p*1.3 + vec2(t*0.03, -t*0.02)) * 0.012 * uSpeed;
+  amb.x /= uAspect;
+  vec2 v = texture(uVel, vUv).xy + amb;
+  vec4 s = texture(uState, vUv - v*uDt);
+
+  // forme cible des taches : bruit lent
+  float n = fbm(p*1.6 + vec2(t*0.015, t*0.01)) + 0.35*fbm(p*4.0 - t*0.02);
+  float thr = mix(0.88, 0.55, uBlob);
+  float target = smoothstep(thr-0.06, thr+0.06, n);
+  s.b += (target - s.b) * (1. - pow(uRelax, uDt));
+
+  // la souris "peint" de la matière
+  vec2 d = vUv - uMouse; d.x *= uAspect;
+  float g = exp(-dot(d,d)/(uRadius*uRadius*0.6));
+  s.b = clamp(s.b + g * uMouseOn * uMouseMove * uDt * 2.5, 0., 1.);
+  o = s;
+}`;
+
+// Réaction-diffusion Gray-Scott (motif labyrinthe)
+const RD_FRAG = `#version 300 es
+precision highp float;
+in vec2 vUv; out vec4 o;
+uniform sampler2D uState; uniform vec2 uTexel; uniform float uSeed;
+float ihash(vec2 c, float s){
+  uint h = uint(c.x)*1973u + uint(c.y)*9277u + uint(s)*26699u;
+  h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16;
+  return float(h) / 4294967295.0;
+}
+void main(){
+  vec4 c = texture(uState, vUv);
+  vec2 lap = -c.rg;
+  lap += 0.2*(texture(uState, vUv+vec2(uTexel.x,0)).rg + texture(uState, vUv-vec2(uTexel.x,0)).rg
+            + texture(uState, vUv+vec2(0,uTexel.y)).rg + texture(uState, vUv-vec2(0,uTexel.y)).rg);
+  lap += 0.05*(texture(uState, vUv+uTexel).rg + texture(uState, vUv-uTexel).rg
+            + texture(uState, vUv+vec2(uTexel.x,-uTexel.y)).rg + texture(uState, vUv+vec2(-uTexel.x,uTexel.y)).rg);
+  float U = c.r, V = c.g, m = c.b;
+  float f = 0.0545, k = 0.062 + (1.-smoothstep(0.2,0.6,m))*0.04;
+  float uvv = U*V*V;
+  U += 1.0*lap.x - uvv + f*(1.-U);
+  V += 0.5*lap.y + uvv - (k+f)*V;
+  // germes à l'intérieur des taches pour que le motif repousse
+  vec2 cellId = floor(vUv / (uTexel*5.0));
+  if (m > 0.5 && V < 0.08 && ihash(cellId, uSeed) > 0.9993) { U = 0.5; V = 0.3; }
+  o = vec4(clamp(U,0.,1.), clamp(V,0.,1.), m, 1.);
+}`;
+
+// Rendu final
+const DISP_FRAG = `#version 300 es
+precision highp float;
+in vec2 vUv; out vec4 o;
+uniform sampler2D uState; uniform sampler2D uVel; uniform vec2 uSimTexel;
+uniform float uTime; uniform float uAspect; uniform float uSpeed; uniform float uBubbles;
+uniform vec3 uBg[4]; uniform vec3 uStripe[4]; uniform vec3 uGap;
+uniform vec2 uMouse; uniform float uMouseOn;
+${NOISE}
+
+vec3 bgColor(vec2 p, float t){
+  vec2 q = vec2(fbm(p + t*0.02), fbm(p + vec2(5.2,1.3) - t*0.015));
+  vec2 r = vec2(fbm(p + 2.5*q + vec2(1.7,9.2) + t*0.03), fbm(p + 2.5*q + vec2(8.3,2.8)));
+  float n = fbm(p + 3.0*r);
+  vec3 col = mix(uBg[0], uBg[1], smoothstep(0.3, 0.75, n));
+  col = mix(col, uBg[2], smoothstep(0.55, 0.85, r.x) * 0.85);
+  col = mix(col, uBg[3], smoothstep(0.62, 0.9, q.y) * 0.75);
+  // filaments plus clairs
+  col += 0.12 * smoothstep(0.02, 0.0, abs(n - 0.5));
+  return col;
+}
+
+float height(vec2 uv){
+  vec4 s = texture(uState, uv);
+  float m = smoothstep(0.35, 0.65, s.b);
+  return m * (0.55 + 0.6*smoothstep(0.12, 0.4, s.g));
+}
+
+void main(){
+  float t = uTime * uSpeed;
+  vec2 vel = texture(uVel, vUv).xy;
+  vec2 p = vec2(vUv.x*uAspect, vUv.y) * 1.8;
+  p -= vel * vec2(uAspect,1.) * 0.08;
+
+  // ---- bulles / gouttelettes d'huile ----
+  vec2 lens = vec2(0.); float rim = 0.; float bubbleSpec = 0.; float inBubble = 0.;
+  if (uBubbles > 0.5) {
+    vec2 bp = vec2(vUv.x*uAspect, vUv.y) * 4.0 + vec2(t*0.05, -t*0.03) - vel*0.3;
+    vec2 cell = floor(bp);
+    for (int j=-1;j<=1;j++) for (int i=-1;i<=1;i++){
+      vec2 c = cell + vec2(i,j);
+      vec3 h = hash3(c);
+      if (h.z < 0.55) continue;
+      vec2 center = c + 0.5 + 0.35*vec2(sin(t*0.4 + h.x*6.28), cos(t*0.33 + h.y*6.28));
+      float rad = 0.12 + 0.28*h.x;
+      vec2 d = bp - center;
+      float dist = length(d);
+      float inside = smoothstep(rad, rad - 0.015, dist);
+      if (inside > 0.) {
+        float z = sqrt(max(0., 1. - (dist*dist)/(rad*rad)));
+        lens += -d/rad * (1.-z) * 0.18 * inside;
+        inBubble = max(inBubble, inside);
+        bubbleSpec = max(bubbleSpec, smoothstep(0.35, 0.0, length(d/rad - vec2(-0.35,0.4))) * inside);
+      }
+      rim = max(rim, smoothstep(0.03, 0.0, abs(dist - rad)) * 0.6);
+    }
+  }
+
+  vec2 uvL = vUv + lens * vec2(1./uAspect, 1.) * 0.25;
+  vec3 col = bgColor(p + lens*1.5, t);
+  col *= 1. + inBubble*0.12;
+
+  // ---- taches à motif ----
+  vec4 s = texture(uState, uvL);
+  float m = smoothstep(0.35, 0.65, s.b);
+  float stripe = smoothstep(0.12, 0.38, s.g);
+  vec2 hp = vec2(vUv.x*uAspect, vUv.y);
+  float hn = fbm(hp*2.2 + vec2(-t*0.02, t*0.015));
+  float hn2 = fbm(hp*5.0 + 11.0);
+  vec3 sc = mix(uStripe[0], uStripe[1], smoothstep(0.35, 0.6, hn));
+  sc = mix(sc, uStripe[2], smoothstep(0.55, 0.75, hn2));
+  sc = mix(sc, uStripe[3], smoothstep(0.62, 0.8, fbm(hp*3.0 + 30.0 + t*0.01)));
+  vec3 blobCol = mix(uGap, sc, stripe);
+  // contour sombre de la tache
+  float edge = smoothstep(0.35, 0.5, s.b) * (1. - smoothstep(0.5, 0.7, s.b));
+  blobCol = mix(blobCol, uGap*0.5, edge*0.7);
+
+  // relief et éclairage brillant
+  vec2 e = uSimTexel * 1.5;
+  float hx = height(uvL + vec2(e.x,0)) - height(uvL - vec2(e.x,0));
+  float hy = height(uvL + vec2(0,e.y)) - height(uvL - vec2(0,e.y));
+  vec3 n = normalize(vec3(-hx*2.2, -hy*2.2, 1.0));
+  vec3 L = normalize(vec3(-0.4, 0.6, 0.7));
+  float diff = clamp(dot(n, L), 0., 1.);
+  vec3 H = normalize(L + vec3(0,0,1));
+  float spec = pow(clamp(dot(n, H), 0., 1.), 60.0);
+  vec3 lit = blobCol * (0.55 + 0.6*diff) + spec * 0.9 * m;
+
+  col = mix(col, lit, m);
+  // ombre portée douce autour des taches
+  float shadow = smoothstep(0.1, 0.4, texture(uState, uvL + vec2(0.006, -0.01)).b) * (1.-m);
+  col *= 1. - shadow*0.25;
+
+  // reflets de surface liquide
+  col += vec3(1.) * (rim * 0.35 + bubbleSpec * 0.6);
+  float sheen = pow(fbm(p*0.8 + vec2(t*0.04, 0.)), 3.0);
+  col += sheen * 0.25;
+
+  // halo léger sous la souris
+  vec2 dm = vUv - uMouse; dm.x *= uAspect;
+  col += vec3(1.,0.9,0.7) * exp(-dot(dm,dm)*120.) * 0.06 * uMouseOn;
+
+  // vignette + grain
+  vec2 vc = vUv - 0.5; col *= 1. - dot(vc,vc)*0.55;
+  col += (hash(vUv*1000. + fract(uTime)*50.) - 0.5) * 0.02;
+  o = vec4(pow(clamp(col,0.,1.), vec3(0.95)), 1.);
+}`;
+
+// ---------- utilitaires GL ----------
+function compile(type, src){
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function program(frag){
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, frag));
+  gl.bindAttribLocation(p, 0, 'aPos');
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {}; const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i=0;i<n;i++){ const info = gl.getActiveUniform(p,i); const name = info.name.replace(/\[0\]$/,''); u[name] = gl.getUniformLocation(p, info.name); }
+  return { p, u };
+}
+const progVel = program(VEL_FRAG), progAdv = program(ADV_FRAG), progRD = program(RD_FRAG), progDisp = program(DISP_FRAG);
+
+const vbo = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+function makeTarget(w, h, data){
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  if (hasFloat) gl.texImage2D(gl.TEXTURE_2D, 0, TEX_FMT.internal, w, h, 0, gl.RGBA, gl.FLOAT, data || null);
+  else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, data ? new Uint8Array(data.map(v=>v*255)) : null);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  return { tex, fbo, w, h };
+}
+function pair(w, h, data){ return { a: makeTarget(w,h,data), b: makeTarget(w,h,data), swap(){ const t=this.a; this.a=this.b; this.b=t; } }; }
+
+let state, vel, simW, simH, W, H;
+
+function initState(w, h){
+  const d = new Float32Array(w*h*4);
+  for (let i=0;i<w*h;i++){
+    const x=i%w, y=(i/w)|0; const blk=((x>>2)*73856093 ^ (y>>2)*19349663)>>>0; const on=(blk%97)<3; d[i*4] = on?0.5:1; d[i*4+1] = on ? 0.3 : 0; d[i*4+2] = 0; d[i*4+3] = 1;
+  }
+  return d;
+}
+
+function resize(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+  H = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+  canvas.width = W; canvas.height = H;
+  const div = Math.max(1, cfg.patternScale);
+  const nw = Math.max(64, Math.floor(canvas.clientWidth / div));
+  const nh = Math.max(64, Math.floor(canvas.clientHeight / div));
+  if (nw !== simW || nh !== simH){
+    simW = nw; simH = nh;
+    state = pair(simW, simH, initState(simW, simH));
+    vel = pair(Math.ceil(simW/2), Math.ceil(simH/2), new Float32Array(Math.ceil(simW/2)*Math.ceil(simH/2)*4));
+    warm = 120; // laisse le motif se former vite au démarrage
+  }
+}
+
+// ---------- souris ----------
+const mouse = { x: 0.5, y: 0.5, px: 0.5, py: 0.5, vx: 0, vy: 0, on: 0, lastMove: -1e9, moved: 0 };
+function onMove(cx, cy){
+  mouse.x = cx / window.innerWidth;
+  mouse.y = 1 - cy / window.innerHeight;
+  mouse.lastMove = performance.now();
+}
+window.addEventListener('mousemove', e => onMove(e.clientX, e.clientY));
+window.addEventListener('pointermove', e => onMove(e.clientX, e.clientY));
+window.addEventListener('touchmove', e => { const t = e.touches[0]; if (t) onMove(t.clientX, t.clientY); }, { passive: true });
+
+// ---------- boucle ----------
+let warm = 0, last = performance.now(), time = 0, lastDraw = 0, seed = 0;
+
+function pass(prog, target, setup){
+  gl.useProgram(prog.p);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+  gl.viewport(0, 0, target ? target.w : W, target ? target.h : H);
+  setup(prog.u);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+function bindTex(unit, tex, loc){ gl.activeTexture(gl.TEXTURE0+unit); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(loc, unit); }
+
+function frame(now){
+  requestAnimationFrame(frame);
+  if (cfg.fps > 0 && now - lastDraw < 1000/cfg.fps - 2) return;
+  lastDraw = now;
+  const dt = Math.min(0.05, (now - last)/1000); last = now;
+  time += dt;
+  const aspect = canvas.clientWidth / canvas.clientHeight;
+
+  // vitesse de la souris (lissée)
+  const rawVx = (mouse.x - mouse.px) / Math.max(dt, 1e-3);
+  const rawVy = (mouse.y - mouse.py) / Math.max(dt, 1e-3);
+  mouse.px = mouse.x; mouse.py = mouse.y;
+  mouse.vx += (rawVx - mouse.vx) * 0.5; mouse.vy += (rawVy - mouse.vy) * 0.5;
+  const active = (now - mouse.lastMove) < 1500;
+  mouse.on += ((active ? 1 : 0) - mouse.on) * 0.08;
+  const moveAmt = Math.min(1, Math.hypot(mouse.vx, mouse.vy) * 0.8);
+  const radius = 0.09;
+  const mScale = cfg.mouse * dt * 6.0;
+
+  pass(progVel, vel.b, u => {
+    bindTex(0, vel.a.tex, u.uVel);
+    gl.uniform1f(u.uDt, dt); gl.uniform1f(u.uAspect, aspect);
+    gl.uniform2f(u.uMouse, mouse.x, mouse.y);
+    gl.uniform2f(u.uMouseVel, mouse.vx * mScale, mouse.vy * mScale);
+    gl.uniform1f(u.uMouseOn, mouse.on * (cfg.mouse > 0 ? 1 : 0));
+    gl.uniform1f(u.uRadius, radius);
+  });
+  vel.swap();
+
+  pass(progAdv, state.b, u => {
+    bindTex(0, state.a.tex, u.uState); bindTex(1, vel.a.tex, u.uVel);
+    gl.uniform1f(u.uDt, dt); gl.uniform1f(u.uTime, time); gl.uniform1f(u.uAspect, aspect);
+    gl.uniform1f(u.uSpeed, cfg.speed);
+    gl.uniform2f(u.uMouse, mouse.x, mouse.y); gl.uniform1f(u.uMouseOn, mouse.on * Math.min(cfg.mouse,1.5));
+    gl.uniform1f(u.uRadius, radius); gl.uniform1f(u.uBlob, cfg.blobAmount); gl.uniform1f(u.uMouseMove, moveAmt);
+    gl.uniform1f(u.uRelax, warm > 0 ? 0.0001 : 0.6);
+  });
+  state.swap();
+
+  const steps = warm > 0 ? 24 : 8; if (warm > 0) warm--;
+  gl.useProgram(progRD.p);
+  for (let i=0;i<steps;i++){
+    pass(progRD, state.b, u => {
+      bindTex(0, state.a.tex, u.uState);
+      gl.uniform2f(u.uTexel, 1/simW, 1/simH);
+      gl.uniform1f(u.uSeed, (seed = (seed + 1) % 100000));
+    });
+    state.swap();
+  }
+
+  const pal = PALETTES[cfg.palette] || PALETTES[0];
+  pass(progDisp, null, u => {
+    bindTex(0, state.a.tex, u.uState); bindTex(1, vel.a.tex, u.uVel);
+    gl.uniform2f(u.uSimTexel, 1/simW, 1/simH);
+    gl.uniform1f(u.uTime, time); gl.uniform1f(u.uAspect, aspect); gl.uniform1f(u.uSpeed, cfg.speed);
+    gl.uniform1f(u.uBubbles, cfg.bubbles ? 1 : 0);
+    gl.uniform3fv(u.uBg, pal.bg.flat()); gl.uniform3fv(u.uStripe, pal.stripe.flat()); gl.uniform3fv(u.uGap, pal.gap);
+    gl.uniform2f(u.uMouse, mouse.x, mouse.y); gl.uniform1f(u.uMouseOn, mouse.on * (cfg.mouse > 0 ? 1 : 0));
+  });
+}
+
+window.addEventListener('resize', resize);
+resize();
+requestAnimationFrame(frame);
+
+// ---------- Wallpaper Engine ----------
+window.wallpaperPropertyListener = {
+  applyUserProperties(p){
+    if (p.speed) cfg.speed = p.speed.value;
+    if (p.mouseforce) cfg.mouse = p.mouseforce.value;
+    if (p.blobamount) cfg.blobAmount = p.blobamount.value;
+    if (p.palette) cfg.palette = parseInt(p.palette.value, 10) || 0;
+    if (p.bubbles) cfg.bubbles = !!p.bubbles.value;
+    if (p.patternscale){ cfg.patternScale = p.patternscale.value; simW = 0; resize(); }
+  },
+  applyGeneralProperties(p){ if (p.fps) cfg.fps = p.fps; },
+};
+
+// Aperçu navigateur : ?palette=1&speed=1.5 ...
+const q = new URLSearchParams(location.search);
+for (const k of ['speed','mouse','patternScale','blobAmount','palette']) if (q.has(k)) cfg[k] = parseFloat(q.get(k));
+if (q.has('bubbles')) cfg.bubbles = q.get('bubbles') !== '0';
+if (q.has('patternScale')) { simW = 0; resize(); }
+})();
+</script>
+</body>
+</html>
