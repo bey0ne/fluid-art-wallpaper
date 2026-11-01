@@ -2,7 +2,7 @@
   "file": "index.html",
   "type": "web",
   "title": "Goutte microscopique",
-  "description": "Une seule petite goutte de liquide à motifs, dans le décor des films microscopiques de liquides, suit la souris en coulant comme une goutte de pluie : elle s'accroche, file en s'étirant en larme, tremble en s'arrêtant, et laisse derrière elle un filet du même liquide qui se casse en perles. Quatre décors tirés de la vidéo : pêche, bordeaux, rose, ambre.",
+  "description": "Une seule petite goutte suit la souris en coulant comme une goutte de pluie : elle s'accroche, file en s'étirant en larme, tremble en s'arrêtant, et laisse derrière elle un filet qui se casse en perles. Quand elle touche une autre goutte, elles fusionnent pour de vrai : un pont de liquide s'ouvre, la petite se vide dans la grande, qui se bombe puis tremble. Quatre thèmes (le liquide à motifs de la vidéo, goutte de pluie sur une vitre la nuit, mercure, miel), plusieurs palettes de couleurs pour chacun et une couleur libre.",
   "preview": "preview.jpg",
   "tags": [
     "Abstract"
@@ -10,50 +10,35 @@
   "general": {
     "supportsaudioprocessing": false,
     "properties": {
-      "dropsize": {
-        "text": "Taille de la goutte",
-        "type": "slider",
-        "min": 0.4,
-        "max": 2.5,
-        "value": 1,
-        "fraction": true,
-        "precision": 2,
-        "order": 0
-      },
-      "follow": {
-        "text": "Vitesse de la goutte (0 = elle ne bouge plus)",
-        "type": "slider",
-        "min": 0,
-        "max": 2,
-        "value": 1,
-        "fraction": true,
-        "precision": 2,
-        "order": 1
-      },
-      "trail": {
-        "text": "Liquide laissé derrière la goutte (0 = aucun)",
-        "type": "slider",
-        "min": 0,
-        "max": 2,
-        "value": 1,
-        "fraction": true,
-        "precision": 2,
-        "order": 2
-      },
-      "dry": {
-        "text": "Secondes avant que les perles sèchent",
-        "type": "slider",
-        "min": 5,
-        "max": 120,
-        "value": 45,
-        "fraction": false,
-        "order": 3
+      "theme": {
+        "text": "Thème",
+        "type": "combo",
+        "value": "0",
+        "order": 0,
+        "options": [
+          {
+            "label": "Microscopique (la vidéo)",
+            "value": "0"
+          },
+          {
+            "label": "Goutte de pluie",
+            "value": "1"
+          },
+          {
+            "label": "Mercure",
+            "value": "2"
+          },
+          {
+            "label": "Miel",
+            "value": "3"
+          }
+        ]
       },
       "decor": {
         "text": "Décor",
         "type": "combo",
         "value": "0",
-        "order": 4,
+        "order": 1,
         "options": [
           {
             "label": "Pêche",
@@ -71,13 +56,163 @@
             "label": "Ambre",
             "value": "3"
           }
-        ]
+        ],
+        "condition": "theme.value == 0"
+      },
+      "dropcolors": {
+        "text": "Couleurs de la goutte",
+        "type": "combo",
+        "value": "0",
+        "order": 2,
+        "options": [
+          {
+            "label": "Celles de la vidéo",
+            "value": "0"
+          },
+          {
+            "label": "Lagon",
+            "value": "1"
+          },
+          {
+            "label": "Néon",
+            "value": "2"
+          },
+          {
+            "label": "Ma couleur",
+            "value": "3"
+          }
+        ],
+        "condition": "theme.value == 0"
+      },
+      "raincolors": {
+        "text": "Lumières derrière la vitre",
+        "type": "combo",
+        "value": "0",
+        "order": 3,
+        "options": [
+          {
+            "label": "Ville la nuit",
+            "value": "0"
+          },
+          {
+            "label": "Coucher de soleil",
+            "value": "1"
+          },
+          {
+            "label": "Forêt",
+            "value": "2"
+          },
+          {
+            "label": "Néon",
+            "value": "3"
+          },
+          {
+            "label": "Ma couleur",
+            "value": "4"
+          }
+        ],
+        "condition": "theme.value == 1"
+      },
+      "metal": {
+        "text": "Métal",
+        "type": "combo",
+        "value": "0",
+        "order": 4,
+        "options": [
+          {
+            "label": "Argent (mercure)",
+            "value": "0"
+          },
+          {
+            "label": "Or",
+            "value": "1"
+          },
+          {
+            "label": "Cuivre",
+            "value": "2"
+          },
+          {
+            "label": "Ma couleur",
+            "value": "3"
+          }
+        ],
+        "condition": "theme.value == 2"
+      },
+      "honey": {
+        "text": "Miel",
+        "type": "combo",
+        "value": "1",
+        "order": 5,
+        "options": [
+          {
+            "label": "Acacia (clair)",
+            "value": "0"
+          },
+          {
+            "label": "Ambré",
+            "value": "1"
+          },
+          {
+            "label": "Châtaignier (foncé)",
+            "value": "2"
+          },
+          {
+            "label": "Ma couleur",
+            "value": "3"
+          }
+        ],
+        "condition": "theme.value == 3"
+      },
+      "mycolor": {
+        "text": "Ma couleur (pour les palettes « Ma couleur »)",
+        "type": "color",
+        "value": "1 0.45 0.2",
+        "order": 6
+      },
+      "dropsize": {
+        "text": "Taille de la goutte",
+        "type": "slider",
+        "min": 0.4,
+        "max": 2.5,
+        "value": 1,
+        "fraction": true,
+        "precision": 2,
+        "order": 7
+      },
+      "follow": {
+        "text": "Vitesse de la goutte (0 = elle ne bouge plus)",
+        "type": "slider",
+        "min": 0,
+        "max": 2,
+        "value": 1,
+        "fraction": true,
+        "precision": 2,
+        "order": 8
+      },
+      "trail": {
+        "text": "Liquide laissé derrière la goutte (0 = aucun)",
+        "type": "slider",
+        "min": 0,
+        "max": 2,
+        "value": 1,
+        "fraction": true,
+        "precision": 2,
+        "order": 9
+      },
+      "dry": {
+        "text": "Secondes avant que les perles sèchent",
+        "type": "slider",
+        "min": 5,
+        "max": 120,
+        "value": 45,
+        "fraction": false,
+        "order": 10
       },
       "quality": {
         "text": "Qualité",
         "type": "combo",
         "value": "-1",
-        "order": 5,
+        "order": 11,
         "options": [
           {
             "label": "Auto (s'adapte à la carte graphique)",
