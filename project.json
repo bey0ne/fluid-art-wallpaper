@@ -2,7 +2,7 @@
   "file": "index.html",
   "type": "web",
   "title": "Fluide microscopique",
-  "description": "Une grosse goutte couverte de vers de peinture (corail, moutarde, olive) cernés de lignes néon cyan, qui suit la souris dans le décor et laisse une traînée d'encre. Elle passe par les états de la vidéo : goutte corail, goutte rose et encre chocolat, encre rouge, huile ambrée.",
+  "description": "Une grosse goutte de liquide couverte de vers de peinture (corail, moutarde, olive) cernés de noir, séparés par des sillons bleus brillants. Elle suit la souris dans le décor : c'est une vraie simulation de fluide, donc elle se déforme, s'étire en traînée quand elle file, puis s'arrondit à nouveau sous l'effet de la tension de surface. Elle passe par les états de la vidéo : goutte corail, goutte rose et encre chocolat, encre rouge, huile ambrée.",
   "preview": "preview.jpg",
   "tags": [
     "Abstract"
@@ -20,7 +20,7 @@
             "value": "-1"
           },
           {
-            "label": "Goutte corail (néon cyan)",
+            "label": "Goutte corail (sillons bleus)",
             "value": "0"
           },
           {

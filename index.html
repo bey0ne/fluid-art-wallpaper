@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Fluide microscopique</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #f9d375; overflow: hidden; }
+  html, body { margin: 0; height: 100%; background: #fac672; overflow: hidden; }
   canvas { display: block; width: 100vw; height: 100vh; }
   #err { position: fixed; inset: 0; display: none; place-items: center; color: #222; font: 16px sans-serif; text-align: center; padding: 16px; }
 </style>
@@ -18,18 +18,18 @@
 'use strict';
 
 /* =====================================================================
-   Fluide microscopique v3 — refait à partir de la vidéo, image par image
-   - Une grosse goutte épaisse qui SUIT LA SOURIS (inertie, étirement, traînée d'encre striée) ;
-     au repos elle dérive et le liquide qui file sous elle l'étire vers le bas
-   - Couverte de vers de peinture (réaction-diffusion Gray-Scott en 32 bits), une couleur par ver
-     (identité propagée le long de chaque ver), sillons noirs avec fines lignes néon cyan, petites perles
-   - Le motif vit dans le repère de la goutte : elle se déplace d'un bloc, sans flou
-   - Bord sombre avec liseré clair, effet dôme, ombre portée teintée, reflets mouillés
-   - Arrière étiré qui s'illumine en cyan (bas de la goutte dans la vidéo)
-   - Enchaînement de la vidéo : goutte corail -> goutte rose qui s'enfonce + encre chocolat
-     -> liquide rose à lignes lumineuses, goutte déchirée en cellules -> huile ambrée, coque olive pleine de perles
-   - Caméra macro qui dérive, flou de mouvement, flou de profondeur, bloom
-   - Résolution adaptative (cartes graphiques intégrées)
+   Fluide microscopique v4 — une vraie mécanique de fluide
+   - Le décor est un liquide simulé (Navier-Stokes) fait de plusieurs liquides de couleurs franches
+     qui ne se mélangent pas : le courant les transporte, les étire et les replie (advection MacCormack,
+     bords nets). Là où une couche en recouvre une autre : liseré lumineux d'un côté, ombre de l'autre.
+   - La grosse goutte à motifs est un corps liquide visqueux. Le curseur l'entraîne, le liquide autour
+     la contourne, la cisaille et étire son arrière en traînée ; la tension de surface (champ de phase
+     d'Allen-Cahn, surface conservée) la garde soudée et arrondit son contour.
+   - Le motif (réaction-diffusion Gray-Scott, une couleur par ver) est transporté par le même courant :
+     il s'étire et se plie avec la goutte, puis se reforme.
+   - Fils de peinture blanche, particules, gouttes d'huile et bulles emportés par le courant.
+   - Rendu mouillé : vers en relief cernés de noir, sillons bleus, reflets du studio plus forts sur les
+     bords bombés (Fresnel), grande ombre bleu-violet, flou de profondeur macro.
    ===================================================================== */
 
 const cfg = {
@@ -38,68 +38,71 @@ const cfg = {
   mouseInk: true,
   patternScale: 1.5,   // taille des vers (plus grand = vers plus gros)
   blobAmount: 0.5,
-  phaseMode: -1,      // -1 = cycle automatique, sinon état fixe 0..3
-  phaseDuration: 15,  // secondes par état
+  phaseMode: -1,       // -1 = cycle automatique, sinon état fixe 0..3
+  phaseDuration: 15,   // secondes par état
   droplets: 1.0,
   dof: 1.0,
   bloom: 1.0,
   motionBlur: 1.0,
   camera: 1.0,
-  quality: -1,        // -1 auto, 0 basse, 1 moyenne, 2 haute
+  quality: -1,         // -1 auto, 0 basse, 1 moyenne, 2 haute
   fps: 60,
 };
 
-// ---------------- États (couleurs relevées sur les images de la vidéo) ----------------
+// ---------------- États (couleurs relevées sur les captures de la vidéo) ----------------
 const hex = h => [parseInt(h.slice(1,3),16)/255, parseInt(h.slice(3,5),16)/255, parseInt(h.slice(5,7),16)/255];
-// Motif (réaction-diffusion) : f/k choisis pour passer des vers (0, 1) aux cellules serrées (2) puis aux perles (3).
-// Champs : base = liquide, inkA/inkB = encres injectées, floodCol = encre qui envahit l'écran à l'arrivée de l'état,
-// cell* = couleurs des vers, line/gap/gap2 = sillons, neon = lignes dans les sillons, wall/lip = bord de la goutte,
-// glow = lignes lumineuses blanc-cyan dans le liquide, speck = particules sombres, shell = coque d'huile ambrée,
-// ragged = goutte déchirée, comb = encre striée, bgGloss = reflets blancs sur l'huile, bead = goutte rose.
+// Liquides du décor : base + 4 liquides [A, B, crue (= base de l'état suivant), traînée], hauteurs pour le relief.
+// Goutte : cellules, contour noir, sillons bleus (gapA -> gapB -> gapC), paroi, liseré.
+// Physique : kv = la goutte suit son repère (plus bas = plus déformable), gamma = tension de surface,
+// current = courant qui étire l'arrière, ragged = bord instable (Marangoni), energy/curl = brassage du liquide.
 const PHASES = [
-  { // 0 : la goutte corail — fond jaune paille, vers corail / moutarde / olive, sillons noirs à fines lignes cyan
-    base: hex('#f9d375'), inkA: hex('#ec8a2c'), inkB: hex('#6a2a0c'), floodCol: hex('#f9d375'),
-    cellA: hex('#e05c33'), cellB: hex('#e8b017'), cellC: hex('#b3a838'),
-    line: hex('#0e0b0f'), gap: hex('#0d142b'), gap2: hex('#172b52'), neon: hex('#9ef2ff'), neonAmt: 1.0,
-    shadow: hex('#a385ba'), shadowMix: 0, shadowOff: 1.0, wall: hex('#0e1022'), lip: hex('#fff7e6'), trailCol: hex('#e07a22'), trail: 1.0,
-    f: 0.0460, k: 0.0630, kvar: 0.0010, iso: 0.078, edgeK: 1.0,
-    drops: 0.0, dropMul: [0.88, 0.50, 0.12], dropAdd: [0, 0, 0], dropStyle: [1.0, 1.0, 0.0, 0.7],
-    speck: 0.0, speckCol: hex('#7a2418'), energy: 0.7, gloss: 1.0, bead: 0.0, inkRate: 0.4,
-    glow: 0.0, glowCol: hex('#8fe9f6'), bgGloss: 0.0, shell: 0.0, ragged: 0.0, comb: 0.0, flow: 0.25, curl: 10,
-    tailIdle: 0.6, isoBand: 0.0, rimDir: 0.0,
+  { // 0 : la goutte corail sur liquide jaune pêche
+    base: hex('#fac672'), liqA: hex('#ec8a2c'), liqB: hex('#7a3412'), trailCol: hex('#d8701e'), liqH: [0, 0.5, 0.8, 0.25, 0.45],
+    lines: 0.0, lineCol: hex('#fff6ee'), speck: 0.0, speckCol: hex('#7a2418'), mottle: 0.0,
+    cellA: hex('#d0643a'), cellB: hex('#d8a414'), cellC: hex('#a8952e'), outline: hex('#1d120d'),
+    gapA: hex('#14223f'), gapB: hex('#2a568e'), gapC: hex('#8cc2e6'), wall: hex('#0d1124'), lip: hex('#fff3e0'),
+    gloss: 1.0, fres: 1.0, shadow: hex('#47578c'), shadowMix: 1, shadowAmt: 0.88, shadowOff: 1.0,
+    f: 0.0460, k: 0.0630, kvar: 0.0016, iso: 0.050, edgeK: 1.0,
+    kv: 6.0, gamma: 0.10, current: 1.0, ragged: 0.15, energy: 0.6, curl: 4,
+    drops: 0.0, dropStyle: [1.0, 1.0, 0.0, 0.7], dropMul: [0.88, 0.50, 0.12], dropAdd: [0, 0, 0], rimDir: 0.0,
+    bubbles: 0.35, ringCol: hex('#fff6ea'),
+    bead: 0.0, inkRate: 0.35, comb: 0.0, trail: 1.0, shell: 0.0, isoBand: 0.0, flow: 1.0,
   },
-  { // 1 : goutte rose mate qui s'enfonce dans la grosse goutte, filets d'encre chocolat, grosses bulles transparentes
-    base: hex('#f6bc7c'), inkA: hex('#b4501e'), inkB: hex('#3a1418'), floodCol: hex('#a8401c'),
-    cellA: hex('#e05c33'), cellB: hex('#e8b017'), cellC: hex('#b3a838'),
-    line: hex('#0e0b12'), gap: hex('#0d1430'), gap2: hex('#1a3060'), neon: hex('#9fe6ff'), neonAmt: 1.0,
-    shadow: hex('#5f6fae'), shadowMix: 1, shadowOff: 2.2, wall: hex('#100e24'), lip: hex('#fff7e6'), trailCol: hex('#4a1810'), trail: 1.0,
-    f: 0.0460, k: 0.0630, kvar: 0.0010, iso: 0.078, edgeK: 1.0,
-    drops: 0.45, dropMul: [0.93, 0.90, 0.93], dropAdd: [0.20, 0.17, 0.19], dropStyle: [1.25, 0.55, 0.004, 0.10],
-    speck: 0.25, speckCol: hex('#5a1a14'), energy: 1.2, gloss: 1.0, bead: 1.0, inkRate: 1.0,
-    glow: 0.0, glowCol: hex('#a8f0ff'), bgGloss: 0.0, shell: 0.0, ragged: 0.15, comb: 1.0, flow: 0.3, curl: 4,
-    tailIdle: 0.15, isoBand: 0.0, rimDir: 0.0,
+  { // 1 : goutte rose qui s'enfonce dans la grosse goutte, encre bordeaux, grosses bulles transparentes
+    base: hex('#fbbb78'), liqA: hex('#cc6421'), liqB: hex('#5e170a'), trailCol: hex('#8b250c'), liqH: [0, 0.4, 0.9, 0.25, 0.7],
+    lines: 0.0, lineCol: hex('#fff0f0'), speck: 0.25, speckCol: hex('#5a1a14'), mottle: 0.4,
+    cellA: hex('#d0643a'), cellB: hex('#d8a414'), cellC: hex('#a8952e'), outline: hex('#1d120d'),
+    gapA: hex('#15224a'), gapB: hex('#2c5896'), gapC: hex('#94c4ee'), wall: hex('#100e24'), lip: hex('#fff3e0'),
+    gloss: 1.0, fres: 1.1, shadow: hex('#5a64a0'), shadowMix: 1, shadowAmt: 0.85, shadowOff: 1.5,
+    f: 0.0460, k: 0.0630, kvar: 0.0016, iso: 0.050, edgeK: 1.0,
+    kv: 6.0, gamma: 0.10, current: 0.45, ragged: 0.25, energy: 1.0, curl: 4,
+    drops: 0.45, dropStyle: [1.25, 0.55, 0.004, 0.10], dropMul: [0.93, 0.90, 0.93], dropAdd: [0.20, 0.17, 0.19], rimDir: 0.0,
+    bubbles: 0.6, ringCol: hex('#fff2f2'),
+    bead: 1.0, inkRate: 1.0, comb: 1.0, trail: 1.0, shell: 0.0, isoBand: 0.0, flow: 1.0,
   },
-  { // 2 : liquide rose, nuages d'encre rouge-orangée, lignes lumineuses blanc-cyan ; la goutte se déchire en cellules serrées au liseré bleu
-    base: hex('#f3a9b1'), inkA: hex('#e8800e'), inkB: hex('#b3280e'), floodCol: hex('#f2a2ae'),
-    cellA: hex('#d8643e'), cellB: hex('#dcab2a'), cellC: hex('#8c8c62'),
-    line: hex('#160a16'), gap: hex('#2f1522'), gap2: hex('#2c335d'), neon: hex('#5f8ef0'), neonAmt: 0.6,
-    shadow: hex('#b0659f'), shadowMix: 0, shadowOff: 1.5, wall: hex('#121a44'), lip: hex('#6f9cff'), trailCol: hex('#b3280e'), trail: 1.0,
+  { // 2 : liquide rose, encre rouge tachetée, nappes orange, fils blancs ; la goutte se déchire en cellules
+    base: hex('#f8a0a8'), liqA: hex('#f27a0c'), liqB: hex('#bd2a0a'), trailCol: hex('#c43010'), liqH: [0.3, 0.0, 0.75, 0.55, 0.6],
+    lines: 1.0, lineCol: hex('#fff4f8'), speck: 1.0, speckCol: hex('#8a2a22'), mottle: 1.0,
+    cellA: hex('#c8643a'), cellB: hex('#cc9618'), cellC: hex('#9a8a52'), outline: hex('#170d1c'),
+    gapA: hex('#16224a'), gapB: hex('#2d5aa0'), gapC: hex('#a8c4e8'), wall: hex('#121a44'), lip: hex('#8fb4ff'),
+    gloss: 1.1, fres: 1.3, shadow: hex('#6a3236'), shadowMix: 0, shadowAmt: 0.55, shadowOff: 1.2,
     f: 0.0410, k: 0.0642, kvar: 0.0012, iso: 0.017, edgeK: 0.35,
-    drops: 0.25, dropMul: [0.90, 0.86, 0.90], dropAdd: [0.14, 0.12, 0.16], dropStyle: [1.0, 0.7, 0.004, 0.3],
-    speck: 1.0, speckCol: hex('#8a2a22'), energy: 1.4, gloss: 1.0, bead: 0.0, inkRate: 1.0,
-    glow: 1.0, glowCol: hex('#8ceaf2'), bgGloss: 0.3, shell: 0.0, ragged: 1.0, comb: 0.5, flow: 0.6, curl: 6,
-    tailIdle: 0.3, isoBand: 0.0, rimDir: 0.0,
+    kv: 3.0, gamma: 0.03, current: 0.8, ragged: 1.0, energy: 1.4, curl: 6,
+    drops: 0.25, dropStyle: [1.0, 0.7, 0.004, 0.3], dropMul: [0.90, 0.86, 0.90], dropAdd: [0.14, 0.12, 0.16], rimDir: 0.0,
+    bubbles: 1.0, ringCol: hex('#fff4f6'),
+    bead: 0.0, inkRate: 1.0, comb: 0.5, trail: 1.0, shell: 0.0, isoBand: 0.0, flow: 1.0,
   },
-  { // 3 : huile ambrée — coque brun olive brillante, perles orange et jaunes cernées de brun, grosses gouttes d'huile
-    base: hex('#f8d20b'), inkA: hex('#f0940b'), inkB: hex('#a03a07'), floodCol: hex('#f8c80c'),
-    cellA: hex('#e46a10'), cellB: hex('#f2a70c'), cellC: hex('#f0cc40'),
-    line: hex('#160402'), gap: hex('#2b0e03'), gap2: hex('#4a4512'), neon: hex('#c8a040'), neonAmt: 0.0,
-    shadow: hex('#b8504a'), shadowMix: 0, shadowOff: 1.3, wall: hex('#1e0a02'), lip: hex('#ff9a20'), trailCol: hex('#8a6a14'), trail: 0.8,
+  { // 3 : huile ambrée — langue d'huile brun sombre brillante, perles orange, grosses gouttes d'huile floues
+    base: hex('#fcd000'), liqA: hex('#f39a06'), liqB: hex('#c05a04'), trailCol: hex('#8a5a10'), liqH: [0, 0.4, 0.7, 0.2, 0.5],
+    lines: 0.0, lineCol: hex('#fff8d0'), speck: 0.15, speckCol: hex('#a03a07'), mottle: 0.0,
+    cellA: hex('#d2600c'), cellB: hex('#f0a00a'), cellC: hex('#a85010'), outline: hex('#140601'),
+    gapA: hex('#1e0b02'), gapB: hex('#3a1c05'), gapC: hex('#5a3a0c'), wall: hex('#1a0902'), lip: hex('#ffb040'),
+    gloss: 1.3, fres: 0.8, shadow: hex('#a8600c'), shadowMix: 0, shadowAmt: 0.5, shadowOff: 1.3,
     f: 0.0440, k: 0.0655, kvar: 0.0024, iso: 0.024, edgeK: 0.6,
-    drops: 0.8, dropMul: [0.86, 0.48, 0.10], dropAdd: [0, 0, 0], dropStyle: [1.35, 2.4, 0.045, 0.5],
-    speck: 0.15, speckCol: hex('#a03a07'), energy: 0.6, gloss: 1.2, bead: 0.0, inkRate: 0.6,
-    glow: 0.0, glowCol: hex('#fff0c0'), bgGloss: 1.0, shell: 1.0, ragged: 0.45, comb: 0.0, flow: 0.25, curl: 3,
-    tailIdle: 0.3, isoBand: 1.0, rimDir: 1.0,
+    kv: 5.0, gamma: 0.12, current: 0.9, ragged: 0.3, energy: 0.5, curl: 3,
+    drops: 0.8, dropStyle: [1.35, 2.4, 0.045, 0.5], dropMul: [0.86, 0.48, 0.10], dropAdd: [0, 0, 0], rimDir: 1.0,
+    bubbles: 0.25, ringCol: hex('#fff6c8'),
+    bead: 0.0, inkRate: 0.6, comb: 0.0, trail: 0.8, shell: 1.0, isoBand: 1.0, flow: 1.0,
   },
 ];
 
@@ -127,6 +130,7 @@ vec3 hash3(vec2 p){ vec3 q = fract(vec3(p.xyx)*vec3(.1031,.1030,.0973)); q += do
 float noise(vec2 p){ vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.-2.*f);
   return mix(mix(hash(i),hash(i+vec2(1,0)),u.x), mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),u.x), u.y); }
 float fbm(vec2 p){ float s=0., a=.5; for(int i=0;i<5;i++){ s+=a*noise(p); p=mat2(1.6,1.2,-1.2,1.6)*p+vec2(3.1,7.7); a*=.5; } return s; }
+float fbm3(vec2 p){ float s=0., a=.5; for(int i=0;i<3;i++){ s+=a*noise(p); p=mat2(1.6,1.2,-1.2,1.6)*p+vec2(3.1,7.7); a*=.5; } return s/0.875; }
 float lum(vec3 c){ return dot(c, vec3(0.299,0.587,0.114)); }
 // échantillonnage bicubique (B-spline, 4 lectures) : contours lisses même très agrandis
 vec4 cubicW(float v){ vec4 n = vec4(1.,2.,3.,4.) - v; vec4 s = n*n*n;
@@ -152,6 +156,17 @@ vec2 toWorld(vec2 uv, float aspect){
 }
 `;
 
+// masque flouté de la goutte, lu depuis le monde (la goutte vit dans son propre repère)
+const BLOBAT = `
+uniform vec2 uFrameC;   // centre du repère de la goutte (coordonnées du monde)
+uniform vec2 uFrameS;   // taille de ce repère (coordonnées du monde) : 1,5 hauteur d'écran dans chaque sens
+float blobAt(sampler2D b, vec2 uv){
+  vec2 lc = (uv - uFrameC) / uFrameS + 0.5;
+  if (lc.x < 0.003 || lc.x > 0.997 || lc.y < 0.003 || lc.y > 0.997) return 0.;
+  return texture(b, lc).r;
+}
+`;
+
 // --- fluide ---
 const ADVECT = HEAD + `
 uniform sampler2D uVel, uSrc; uniform vec2 uVelTexel; uniform float uDt, uDiss;
@@ -160,24 +175,65 @@ void main(){
   o = texture(uSrc, c) / (1.0 + uDiss*uDt);
 }`;
 
-const FORCES = HEAD + `
-uniform sampler2D uVel; uniform float uDt, uAspect, uTime, uEnergy;
-uniform vec4 uEm[4]; uniform vec4 uEmP[4];   // pos.xy vel.xy | rayon, force, -, -
-uniform vec4 uHeroF; uniform vec2 uHeroFP;   // goutte : pos.xy vitesse.xy | rayon², force
+// forces : sources qui remuent le liquide, courants lents, la goutte entraînée par le curseur,
+// bord instable (Marangoni), courant qui étire l'arrière de la goutte
+const FORCES = HEAD + BLOBAT + `
+uniform sampler2D uVel, uBlob, uRed, uRed2;
+uniform float uDt, uAspect, uTime, uEnergy, uKv, uR, uRagged, uTexPerH, uRelaxK, uRear;
+uniform vec4 uEm[4]; uniform vec4 uEmP[4];   // position, vitesse | rayon², force
+uniform vec2 uFrameV;                         // vitesse du repère de la goutte (texels / s)
+uniform vec4 uCurrent;                        // courant : direction (x, y), accélération (hauteurs / s²)
+uniform vec2 uBTexel;                         // pas du gradient du masque (uv)
 void main(){
   vec2 v = texture(uVel, vUv).xy;
+  vec2 asp = vec2(uAspect, 1.);
+  float phi = blobAt(uBlob, vUv), free = 1.0 - phi;
   for (int i=0;i<4;i++){
-    vec2 d = vUv - uEm[i].xy; d.x *= uAspect;
+    vec2 d = (vUv - uEm[i].xy) * asp;
     float g = exp(-dot(d,d)/uEmP[i].x);
-    v += (uEm[i].zw - v) * g * min(1., uEmP[i].y*uDt);
+    v += (uEm[i].zw - v) * g * min(1., uEmP[i].y*uDt) * free;
   }
-  vec2 q = vec2(vUv.x*uAspect, vUv.y)*2.0;
-  float e = 0.02;
-  float n1 = fbm(q+vec2(0,e)+uTime*0.05), n2 = fbm(q-vec2(0,e)+uTime*0.05);
-  float n3 = fbm(q+vec2(e,0)+uTime*0.05), n4 = fbm(q-vec2(e,0)+uTime*0.05);
-  v += vec2(n1-n2, -(n3-n4))/(2.*e) * 7.0 * uEnergy * uDt;
-  vec2 d = vUv - uHeroF.xy; d.x *= uAspect;
-  v += (uHeroF.zw - v) * exp(-dot(d,d)/uHeroFP.x) * min(1., uHeroFP.y*uDt);
+  // courants lents du liquide (convection)
+  vec2 q = vUv*asp*2.0; float e = 0.02, tt = uTime*0.05;
+  float n1 = fbm(q+vec2(0,e)+tt), n2 = fbm(q-vec2(0,e)+tt), n3 = fbm(q+vec2(e,0)+tt), n4 = fbm(q-vec2(e,0)+tt);
+  v += vec2(n1-n2, -(n3-n4))/(2.*e) * 0.044 * uTexPerH * uEnergy * uDt * (1.0 - 0.85*phi);
+  // la goutte : corps visqueux que le curseur tire par l'avant ; l'arrière, moins tenu, traîne et s'étire.
+  // La tension de surface la ramène vers une forme ronde : écoulement d'étirement inverse, calculé
+  // à partir de la forme réelle de la goutte (moments d'inertie lus dans les mipmaps).
+  // le liquide collé à la goutte (couche limite) part avec elle : son contour avance à sa vitesse
+  // au lieu d'être rongé à l'avant par le liquide immobile
+  float phiD = smoothstep(0.02, 0.40, phi);
+  if (phiD > 0.001) {
+    vec4 r1 = textureLod(uRed, vec2(0.5), 8.0), r2 = textureLod(uRed2, vec2(0.5), 8.0);
+    float A = max(r1.x, 1e-5);
+    vec2 mc = r1.yz / A;
+    float cxx = r2.x/A - mc.x*mc.x, cyy = r2.y/A - mc.y*mc.y, cxy = r2.z/A - mc.x*mc.y;
+    float h = 0.5*(cxx + cyy) + 1e-5;
+    vec2 X = (vUv - uFrameC) * asp - mc;
+    vec2 vs = -uRelaxK * vec2((cxx - h)*X.x + cxy*X.y, cxy*X.x + (cyy - h)*X.y) / h;
+    vec2 back = -uCurrent.xy;   // direction du mouvement
+    float rear = smoothstep(-0.25, 1.0, dot(X / uR, -back));
+    float kv = uKv * (1.0 - uRear*rear);
+    v += (uFrameV + vs*uTexPerH - v) * phiD * min(1., kv*uDt);
+  }
+  // bord instable (effet Marangoni) : le contour gonfle et se creuse par endroits
+  float rim = 4.0*phi*(1.0 - phi);
+  if (uRagged > 0.001 && rim > 0.02) {
+    vec2 gb = vec2(blobAt(uBlob, vUv + vec2(uBTexel.x,0)) - blobAt(uBlob, vUv - vec2(uBTexel.x,0)),
+                   blobAt(uBlob, vUv + vec2(0,uBTexel.y)) - blobAt(uBlob, vUv - vec2(0,uBTexel.y)));
+    vec2 nrm = -gb / (length(gb) + 1e-4);
+    vec2 dc = (vUv - uFrameC) * asp;
+    vec2 ca = dc / (length(dc) + 1e-4);
+    float mar = (fbm(ca*1.6 + vec2(2.0, uTime*0.10)) - 0.5) + 0.7*(noise(ca*5.0 + vec2(3.0, uTime*0.22)) - 0.5);
+    v += nrm * mar * uRagged * 0.20 * uTexPerH * uDt * rim;
+  }
+  // courant qui file derrière la goutte et étire son arrière en traînée
+  vec2 rq = (vUv - uFrameC) * asp / uR;
+  vec2 dir = uCurrent.xy, per = vec2(-dir.y, dir.x);
+  float al = dot(rq, dir), ac = dot(rq, per);
+  // (profil gaussien : un courant à bords droits cisaillerait la goutte et les encres en lignes droites)
+  float band = exp(-ac*ac*1.1) * smoothstep(-0.2, 1.0, al) * exp(-max(al - 1.2, 0.)*0.8);
+  v += dir * uCurrent.z * uTexPerH * band * uDt * (1.0 - 0.5*phi);
   o = vec4(v, 0., 1.);
 }`;
 
@@ -189,15 +245,16 @@ void main(){
   o = vec4(0.5*(R - L - T + B), 0., 0., 1.);
 }`;
 
-const VORT = HEAD + `
-uniform sampler2D uVel, uCurl; uniform vec2 uTexel; uniform float uCurlAmt, uDt;
+// confinement de la vorticité (tourbillons du liquide), coupé dans la goutte (elle est visqueuse)
+const VORT = HEAD + BLOBAT + `
+uniform sampler2D uVel, uCurl, uBlob; uniform vec2 uTexel; uniform float uCurlAmt, uDt;
 void main(){
   float L = texture(uCurl, vUv - vec2(uTexel.x,0)).x, R = texture(uCurl, vUv + vec2(uTexel.x,0)).x;
   float T = texture(uCurl, vUv + vec2(0,uTexel.y)).x, B = texture(uCurl, vUv - vec2(0,uTexel.y)).x;
   float C = texture(uCurl, vUv).x;
   vec2 f = 0.5*vec2(abs(T)-abs(B), abs(R)-abs(L));
   f /= length(f) + 1e-4;
-  f *= uCurlAmt * C; f.y *= -1.0;
+  f *= uCurlAmt * C * (1.0 - blobAt(uBlob, vUv)); f.y *= -1.0;
   vec2 v = texture(uVel, vUv).xy + f*uDt;
   o = vec4(clamp(v, -1000., 1000.), 0., 1.);
 }`;
@@ -235,16 +292,34 @@ void main(){
   o = vec4(texture(uVel, vUv).xy - vec2(R - L, T - B), 0., 1.);
 }`;
 
-// --- encres ---
-const DYE = HEAD + `
-uniform sampler2D uVel, uDye; uniform vec2 uVelTexel; uniform float uDt, uAspect, uTime;
-uniform vec3 uBase; uniform vec3 uInk[4]; uniform vec4 uEm[4]; uniform vec4 uEmI[4]; // rayon, quantité, particules, stries
-uniform vec2 uMouse; uniform float uMouseInk, uMouseR; uniform vec3 uMouseCol; uniform float uSpeck, uRelaxBase;
+// --- transport sans flou (MacCormack) : les liquides gardent des bords nets ---
+const MACC = `
+vec4 macAdvect(sampler2D src, vec2 uv){
+  vec2 v0 = texture(uVel, uv).xy * uVelTexel;
+  vec2 xb = uv - uDt * v0;
+  vec4 a = texture(src, xb);
+  vec2 xf = uv + uDt * v0;
+  vec4 b = texture(src, xf - uDt * texture(uVel, xf).xy * uVelTexel);
+  vec4 r = a + 0.5*(texture(src, uv) - b);
+  ivec2 sz = textureSize(src, 0);
+  vec2 gp = xb * vec2(sz) - 0.5;
+  ivec2 i0 = clamp(ivec2(floor(gp)), ivec2(0), sz - 1), i1 = clamp(ivec2(floor(gp)) + 1, ivec2(0), sz - 1);
+  vec4 c00 = texelFetch(src, i0, 0), c11 = texelFetch(src, i1, 0);
+  vec4 c10 = texelFetch(src, ivec2(i1.x, i0.y), 0), c01 = texelFetch(src, ivec2(i0.x, i1.y), 0);
+  return clamp(r, min(min(c00, c10), min(c01, c11)), max(max(c00, c10), max(c01, c11)));
+}
+`;
+
+// --- liquides du décor : fractions de 4 liquides (le reste est le liquide de base) ---
+const LIQ = HEAD + `
+uniform sampler2D uVel, uSrc; uniform vec2 uVelTexel; uniform float uDt, uAspect, uTime;
+uniform vec4 uEm[4]; uniform vec4 uEmI[4];   // émetteurs : position, vitesse | rayon², quantité, liquide (0..3), stries
+uniform vec4 uRelax;                          // retour au liquide de base (par liquide, 1/s)
+uniform vec2 uTrailP; uniform float uTrailAmt, uTrailR;
+` + MACC + `
 void main(){
-  vec2 c = vUv - uDt * texture(uVel, vUv).xy * uVelTexel;
-  vec4 d = texture(uDye, c);
-  d.rgb = mix(d.rgb, uBase, 1.0 - exp(-uDt*uRelaxBase));
-  d.a *= exp(-uDt*0.10);   // densité de particules sombres (dessinées au rendu)
+  vec4 f = macAdvect(uSrc, vUv);
+  f *= exp(-uDt * uRelax);
   for (int i=0;i<4;i++){
     vec2 p = vUv - uEm[i].xy; p.x *= uAspect;
     float g = exp(-dot(p,p)/uEmI[i].x);
@@ -252,28 +327,49 @@ void main(){
     vec2 vd = uEm[i].zw; float vl = length(vd);
     vec2 pe = vl > 1e-4 ? vec2(-vd.y, vd.x)/vl : vec2(0., 1.);
     float comb = 1.0 - uEmI[i].w * smoothstep(0.40, 0.60, noise(vec2(dot(p, pe)*45.0, uTime*0.25 + float(i)*7.3)));
-    d.rgb = mix(d.rgb, uInk[i], clamp(g*uEmI[i].y*uDt*comb, 0., 1.));
-    d.a = max(d.a, g * uEmI[i].z * uSpeck * 0.9);
+    float a = clamp(g*uEmI[i].y*uDt*comb, 0., 1.);
+    float ch = uEmI[i].z;
+    vec4 one = vec4(abs(ch) < 0.5, abs(ch - 1.0) < 0.5, abs(ch - 2.0) < 0.5, abs(ch - 3.0) < 0.5);
+    f = f*(1.0 - a) + one*a;
   }
-  vec2 p = vUv - uMouse; p.x *= uAspect;
-  d.rgb = mix(d.rgb, uMouseCol, clamp(exp(-dot(p,p)/uMouseR)*uMouseInk*uDt, 0., 1.));
-  o = d;
+  // encre laissée derrière la goutte quand elle file
+  vec2 p = vUv - uTrailP; p.x *= uAspect;
+  float a = clamp(exp(-dot(p,p)/uTrailR)*uTrailAmt*uDt, 0., 1.);
+  f = f*(1.0 - a) + vec4(0., 0., 0., 1.)*a;
+  float s = f.x + f.y + f.z + f.w; if (s > 1.0) f /= s;
+  o = max(f, 0.);
+}`;
+
+// --- fils de peinture blanche (r) et densité de particules sombres (g), transportés de même ---
+const AUX = HEAD + `
+uniform sampler2D uVel, uSrc; uniform vec2 uVelTexel; uniform float uDt, uAspect;
+uniform vec4 uSEm;      // fil blanc : position, rayon², quantité
+uniform vec4 uKEm[2];   // particules : position, rayon², quantité
+uniform vec2 uAuxRelax;
+` + MACC + `
+void main(){
+  vec4 f = macAdvect(uSrc, vUv);
+  f.xy *= exp(-uDt * uAuxRelax);
+  vec2 p = vUv - uSEm.xy; p.x *= uAspect;
+  f.x = max(f.x, exp(-dot(p,p)/uSEm.z) * uSEm.w);
+  for (int i=0;i<2;i++){
+    vec2 k = vUv - uKEm[i].xy; k.x *= uAspect;
+    f.y = max(f.y, exp(-dot(k,k)/uKEm[i].z) * uKEm[i].w);
+  }
+  o = vec4(clamp(f.xy, 0., 1.5), 0., 1.);
 }`;
 
 // --- coordonnées entraînées par le liquide (2 phases décalées, remises à zéro tour à tour) ---
-// Les lignes lumineuses, les particules et les reflets du liquide sont dessinés dans ces coordonnées :
-// ils suivent le courant et s'étirent avec lui.
+// Les particules et la marbrure de l'encre sont dessinées dans ces coordonnées : elles suivent le courant.
 const FLOWUV = HEAD + `
 uniform sampler2D uVel, uFlowUV; uniform vec2 uVelTexel, uTexel; uniform float uDt; uniform vec2 uReset;
 void main(){
-  // courant lissé (sans les petits tourbillons de la grille) : les lignes restent des courbes souples
   vec2 r = uVelTexel * 3.0;
   vec2 v = 0.2*texture(uVel, vUv).xy
          + 0.2*(texture(uVel, vUv + vec2(r.x, 0.)).xy + texture(uVel, vUv - vec2(r.x, 0.)).xy
               + texture(uVel, vUv + vec2(0., r.y)).xy + texture(uVel, vUv - vec2(0., r.y)).xy);
   vec2 c = vUv - uDt * v * uVelTexel;
   vec4 f = texture(uFlowUV, c);
-  // légère diffusion : efface les petits tourbillons (les lignes restent des courbes lisses)
   vec4 nb = texture(uFlowUV, c + vec2(uTexel.x, 0.)) + texture(uFlowUV, c - vec2(uTexel.x, 0.))
           + texture(uFlowUV, c + vec2(0., uTexel.y)) + texture(uFlowUV, c - vec2(0., uTexel.y));
   f = mix(f, nb*0.25, 0.35);
@@ -282,30 +378,59 @@ void main(){
   o = f;
 }`;
 
-// --- matière à motif : r=U g=V b=masque a=teinte ---
-// Elle vit dans le repère de la goutte (centre de la goutte = centre de la texture) :
-// la goutte se déplace d'un bloc avec ses motifs, sans flou de rééchantillonnage.
+// --- la goutte : r=U g=V (motif) b=phase (1 = goutte) a=identité du ver ---
+// Elle vit dans son propre repère (qui suit le curseur) ; dedans, tout est transporté par le courant relatif :
+// la goutte et son motif se déforment, s'étirent et se plient avec le liquide.
 const MAT = HEAD + `
-uniform sampler2D uVel, uMat; uniform vec2 uVelTexel, uTexelM; uniform float uDt, uAspect, uTime, uRelax, uR, uFlow, uRagged;
-uniform vec2 uHeroW;
+uniform sampler2D uVel, uMat, uRed, uRed2, uSmooth; uniform float uTension, uShapeK;
+uniform vec2 uVelTexel, uTexelM, uFrameC, uFrameV, uFrameS; uniform float uSpan;
+uniform float uDt, uAspect, uGamma, uAreaT, uKc, uInit, uR, uFlow;
 void main(){
-  // le liquide autour déforme un peu la goutte (mouvement relatif au centre de la goutte)
-  vec2 pw = uHeroW + (vUv - 0.5);
-  vec2 vf = texture(uVel, pw).xy - texture(uVel, uHeroW).xy;
-  vec2 c = vUv - uDt * vf * uVelTexel * uFlow;
+  vec2 pw = uFrameC + (vUv - 0.5) * uFrameS;
+  vec2 u = (texture(uVel, pw).xy * uVelTexel - uFrameV) / uFrameS * uFlow;   // courant relatif à la goutte
+  vec4 red = textureLod(uRed, vec2(0.5), 8.0);                     // surface et centre de la goutte
+  float A = max(red.x, 1e-5);
+  vec2 cen = red.yz / A / uSpan;
+  u -= cen * uKc;                                                  // la goutte reste au centre de son repère
+  vec2 c = vUv - uDt * u;
   vec4 s = texture(uMat, c);
-  s.a = texelFetch(uMat, ivec2(c / uTexelM), 0).a;     // identité du ver : jamais mélangée
-  vec2 d = (vUv - 0.5) * vec2(uAspect, 1.);
-  float an = atan(d.y, d.x);
-  vec2 ca = vec2(cos(an), sin(an));
-  float wob = fbm(ca*1.1 + vec2(uTime*0.035, -uTime*0.02)) - 0.5;
-  // goutte déchirée (état 2) : grands lobes + petites franges sur le pourtour
-  float rag = fbm(ca*2.6 + vec2(-uTime*0.05, uTime*0.04) + 9.1) - 0.5;
-  float fr = fbm(ca*7.5 + vec2(uTime*0.07, uTime*0.05) + 3.7) - 0.5;
-  float r = uR * (1.0 + 0.20*wob + uRagged*(0.34*rag + 0.16*fr));
-  float target = smoothstep(r + 0.004, r - 0.004, length(d));
-  s.b += (target - s.b) * (1.0 - exp(-uDt*uRelax));
-  s.b += (smoothstep(0.15, 0.85, s.b) - s.b) * min(1., 2.0*uDt);   // anti-diffusion : bord net mais lisse
+  s.a = texelFetch(uMat, ivec2(c / uTexelM), 0).a;                 // identité du ver : jamais mélangée
+  // tension de surface (Allen-Cahn) : diffusion + double puits -> le contour se lisse, les fils fins se pincent
+  float pl = texture(uMat, c - vec2(uTexelM.x, 0.)).b, pr = texture(uMat, c + vec2(uTexelM.x, 0.)).b;
+  float pt = texture(uMat, c + vec2(0., uTexelM.y)).b, pb = texture(uMat, c - vec2(0., uTexelM.y)).b;
+  // profil en tangente hyperbolique large de ~5 texels : le contour glisse sur la grille sans facettes
+  float D = clamp(0.08 + 1.2*uGamma, 0.05, 0.22);
+  float ph = s.b + D * (pl + pr + pt + pb - 4.0*s.b);
+  ph += (D / 1.6) * 2.0 * ph*(1.0 - ph)*(2.0*ph - 1.0);
+  // tension de surface : les bosses rentrent, les creux se remplissent, les filaments fins se rétractent
+  // (le masque très flouté vaut moins de 0,5 sur une bosse et plus de 0,5 dans un creux)
+  float Bs = texture(uSmooth, c).r;
+  float gph = 0.5 * length(vec2(pr - pl, pt - pb));
+  ph += uDt * uTension * (Bs - 0.5) * gph;
+  // à grande échelle, le contour revient vers l'ellipse qui a les mêmes moments que la goutte
+  // (elle-même ramenée vers le cercle par l'écoulement d'étirement inverse) : la goutte s'arrondit
+  // après avoir été étirée, mais garde une traînée tant qu'elle bouge
+  vec4 r2 = textureLod(uRed2, vec2(0.5), 8.0);
+  vec2 mc = red.yz / A;
+  float cxx = r2.x/A - mc.x*mc.x, cyy = r2.y/A - mc.y*mc.y, cxy = r2.z/A - mc.x*mc.y;
+  float det = max(cxx*cyy - cxy*cxy, 1e-8);
+  vec2 X = (vUv - 0.5) * uSpan - mc;
+  float rho = sqrt(max((cyy*X.x*X.x - 2.0*cxy*X.x*X.y + cxx*X.y*X.y) / det, 0.) * 0.25);
+  float Rd = sqrt(2.0*max(cxx + cyy, 1e-6));
+  ph -= uDt * uShapeK * clamp(rho - 1.0, -0.4, 0.4) * Rd / (uTexelM.y * uSpan) * gph;
+  // surface conservée : le contour avance ou recule un peu selon la surface totale
+  ph += clamp((uAreaT - A) / uAreaT, -0.3, 0.3) * 4.0*ph*(1.0 - ph) * min(1., 3.0*uDt);
+  // jamais coupée net par le bord de son repère
+  float fe = min(min(vUv.x, 1.0 - vUv.x), min(vUv.y, 1.0 - vUv.y)) * uSpan;
+  ph *= mix(1.0, smoothstep(0.0, 0.06, fe), min(1., 4.0*uDt));
+  s.b = clamp(ph, 0., 1.);
+  if (uInit > 0.5) {
+    vec2 d = (vUv - 0.5) * uSpan;
+    float an = atan(d.y, d.x);
+    vec2 ca = vec2(cos(an), sin(an));
+    float r = uR * (1.0 + 0.10*(fbm(ca*1.1 + 3.0) - 0.5));
+    s.b = smoothstep(r + 0.004, r - 0.004, length(d));
+  }
   o = s;
 }`;
 
@@ -331,24 +456,21 @@ void main(){
   float eB = texture(uEdge, vUv).r;
   float k = uK + (1.0 - smoothstep(0.3, 0.6, m))*0.04
           + uEdgeK*((1.0 - smoothstep(0.72, 0.97, eB))*0.0035 + (1.0 - smoothstep(0.55, 0.70, eB))*0.02)
-          + uKVar*(noise(vUv/uTexel*0.018) - 0.5);
+          + uKVar*(noise(vUv/uTexel*0.03) - 0.5);
   float uvv = U*V*V;
   U += 1.0*lap.x - uvv + uF*(1.-U);
   V += 0.5*lap.y + uvv - (k+uF)*V;
   vec2 cell = floor(vUv / (uTexel*5.0));
-  // graines seulement dans les zones vraiment vides (sinon les vers se soudent en labyrinthe)
+  // graines seulement dans les zones vraiment vides (une goutte étirée se remplit de nouveaux vers)
   if (m > 0.55 && U > 0.97 && V < 0.004 && ihash(cell, uSeed) > 0.997) { U = 0.5; V = 0.3; }
   // identité du ver : la plus grande se propage le long du coeur du ver (une couleur par ver),
   // puis chaque bord de ver prend l'identité du voisin le plus haut (ligne de partage des eaux).
-  // id > 0 : identité du ver (sa couleur est tirée de l'identité au rendu) ; 0 = pas de ver
   const float CORE = 0.15;
-  // les identités sont lues sans filtrage (texelFetch) : un filtrage linéaire les abîme peu à peu
   ivec2 ic = ivec2(gl_FragCoord.xy), mxI = textureSize(uMat, 0) - 1;
   #define IDAT(dx, dy) texelFetch(uMat, clamp(ic + ivec2(dx, dy), ivec2(0), mxI), 0).a
   nR.a = IDAT(1,0); nL.a = IDAT(-1,0); nT.a = IDAT(0,1); nB.a = IDAT(0,-1);
   n1.a = IDAT(1,1); n2.a = IDAT(-1,-1); n3.a = IDAT(1,-1); n4.a = IDAT(-1,1);
   float id = IDAT(0,0) * (1.0 - uIdReset), mx = 0.0, mk = -1.0;
-  // voisin de coeur dont la clé est la plus grande
   #define TAKE(n) if (n.g > CORE) { float kk = idKey(n.a); if (kk > mk) { mk = kk; mx = n.a; } }
   TAKE(nR) TAKE(nL) TAKE(nT) TAKE(nB) TAKE(n1) TAKE(n2) TAKE(n3) TAKE(n4)
   mx *= 1.0 - uIdReset;
@@ -356,9 +478,8 @@ void main(){
     vec2 tc = floor(vUv / uTexel);
     if (mx > 3.5 && (id < 3.5 || idKey(mx) > idKey(id))) id = mx;
     else if (id < 3.5) id = 4.0 + 2.0*floor(ihash(tc, uSeed + 7.0)*uIdLevels*0.5) + uEpoch;
-    // recoloriage progressif : le front passe en taches, chaque cellule touchée reçoit une nouvelle
-    // identité de l'époque en cours, qui gagne ensuite toute la cellule (une nouvelle couleur par cellule)
-    if (uSweep >= 0.0 && abs(mod(floor(id + 0.5), 2.0) - uEpoch) > 0.5 && noise(tc*0.045 + uEpoch*17.0) < uSweep)
+    // recoloriage progressif : chaque cellule touchée par le front reçoit une nouvelle couleur
+    if (uSweep >= 0.0 && abs(mod(floor(id + 0.5), 2.0) - uEpoch) > 0.5 && noise(tc*0.07 + uEpoch*17.0) < uSweep)
       id = 4.0 + 2.0*floor(ihash(tc, uSeed + 11.0)*uIdLevels*0.5) + uEpoch;
   } else if (c.g > 0.02 && m > 0.2) {
     vec4 up = nR;
@@ -369,7 +490,7 @@ void main(){
   o = vec4(clamp(U,0.,1.), clamp(V,0.,1.), m, id);
 }`;
 
-// --- préparation du rendu : V, gradient de V, masque (lu ensuite en bicubique) ---
+// --- préparation du rendu : V, gradient de V, phase (lus ensuite en bicubique) ---
 const PREP = HEAD + `
 uniform sampler2D uMat; uniform vec2 uTexel;
 void main(){
@@ -379,7 +500,7 @@ void main(){
   o = vec4(c.g, 0.5*(R - Lf), 0.5*(T - B), c.b);
 }`;
 
-// --- masque flouté (ombre portée, dôme), en basse résolution ---
+// --- masque flouté (ombre portée, dôme, couplage avec le liquide), en basse résolution ---
 const SHADOW = HEAD + `
 uniform sampler2D uMat; uniform vec2 uTexel;
 void main(){
@@ -391,43 +512,94 @@ void main(){
   o = vec4(s/w, 0., 0., 1.);
 }`;
 
+// --- masque très flouté (tension de surface à grande échelle) ---
+const BLURM = HEAD + `
+uniform sampler2D uSrc; uniform vec2 uTexel;
+void main(){
+  float s = 0., w = 0.;
+  for (int j=-2;j<=2;j++) for (int i=-2;i<=2;i++){ float k = exp(-float(i*i + j*j)*0.3); s += k*texture(uSrc, vUv + vec2(i,j)*uTexel).r; w += k; }
+  o = vec4(s/w, 0., 0., 1.);
+}`;
+
+// --- réduction : surface et centre de la goutte (moyennés ensuite par les mipmaps, sans relecture) ---
+const REDUCE = HEAD + `
+uniform sampler2D uBlob; uniform float uSpan, uMode;
+void main(){
+  float b = texture(uBlob, vUv).r; vec2 X = (vUv - 0.5) * uSpan;
+  o = uMode < 0.5 ? vec4(b, b*X, 1.) : vec4(b*X.x*X.x, b*X.y*X.y, b*X.x*X.y, 1.);
+}`;
+
+// --- gouttes d'huile et bulles : transportées par le courant, chassées de la grosse goutte ---
+const PART = HEAD + BLOBAT + `
+uniform sampler2D uP, uVel, uBlob; uniform vec2 uVelTexel; uniform float uDt, uTime, uAspect, uSalt, uNBig;
+vec4 spawn(float idx, float salt){
+  vec3 h = hash3(vec2(idx*1.37 + salt, salt*0.71 + idx*0.13));
+  vec3 h2 = hash3(vec2(idx*3.11 + salt*1.3, 5.7 + salt));
+  float r = idx < uNBig ? 0.050 + 0.085*h.z : 0.0028 + 0.020*h.z*h.z*h.z;
+  return vec4(-0.04 + 1.08*h.x, -0.04 + 1.08*h.y, r, uTime + 0.5*h2.x);
+}
+void main(){
+  float idx = floor(gl_FragCoord.x);
+  vec4 p = texelFetch(uP, ivec2(gl_FragCoord.xy), 0);
+  if (p.z <= 0.0) { p = spawn(idx, uSalt); p.w = uTime - 10.0; o = p; return; }
+  vec2 v = texture(uVel, p.xy).xy;
+  if (p.z > 0.02) {   // grosse goutte : courant moyen sous elle
+    vec2 rr = vec2(p.z/uAspect, p.z)*0.6;
+    v = 0.2*v + 0.2*(texture(uVel, p.xy + vec2(rr.x,0)).xy + texture(uVel, p.xy - vec2(rr.x,0)).xy
+                   + texture(uVel, p.xy + vec2(0,rr.y)).xy + texture(uVel, p.xy - vec2(0,rr.y)).xy);
+  }
+  vec2 dv = v * uVelTexel;
+  float b = blobAt(uBlob, p.xy);
+  if (b > 0.02) {   // la grosse goutte les écarte
+    float e = 0.01;
+    vec2 g = vec2(blobAt(uBlob, p.xy + vec2(e,0)) - blobAt(uBlob, p.xy - vec2(e,0)), blobAt(uBlob, p.xy + vec2(0,e)) - blobAt(uBlob, p.xy - vec2(0,e)));
+    dv -= g / (length(g) + 1e-4) * b * 0.30 * vec2(1.0/uAspect, 1.0);
+  }
+  p.xy += dv * uDt;
+  if (p.x < -0.25 || p.x > 1.25 || p.y < -0.25 || p.y > 1.25) p = spawn(idx, uSalt);
+  o = p;
+}`;
+
 // --- rendu de la scène ---
 const SCENE = HEAD + `
-uniform sampler2D uDye, uMat, uPrep, uVel, uShadow, uFlowUV;
-uniform vec2 uDyeTexel, uMatTexel, uVelTexel, uShadowTexel;
-uniform float uAspect, uTime, uDrops, uGloss, uNeonAmt, uIso, uDomeW, uTrail, uGlow, uBgGloss, uSpeck, uShell, uPx, uShadowMix, uShadowOff;
-uniform vec4 uDropStyle;   // taille, épaisseur du bord, flou du bord, reflet
-uniform float uIsoBand, uRimDir;
-uniform vec3 uCell[3]; uniform vec3 uLine, uGap, uGap2, uNeon, uShadowCol, uWall, uLip, uTrailA, uTrailB;
-uniform vec3 uGlowCol, uSpeckCol, uDropMul, uDropAdd, uBase;
-uniform vec4 uHero; uniform vec2 uHeroDir;          // centre (monde), rayon, étirement 0..1 | direction du mouvement
+uniform sampler2D uLiq, uAux, uPrep, uMat, uShadow, uFlowUV, uP;
+uniform vec2 uLiqTexel, uAuxTexel, uMatTexel, uShadowTexel;
+uniform float uAspect, uTime, uPx, uClock;
+uniform vec3 uBase; uniform vec3 uLiqCol[4]; uniform vec4 uLiqH; uniform float uLiqH0;
+uniform vec3 uLineCol; uniform float uSpeck, uMottle; uniform vec3 uSpeckCol;
+uniform vec4 uFlowW, uFlowOff;
+uniform float uDrops; uniform vec4 uDropStyle; uniform vec3 uDropMul, uDropAdd; uniform float uRimDir; uniform int uNBig;
+uniform vec2 uFrameC, uFrameS;
+uniform vec3 uCell[3]; uniform vec3 uOutline, uGapA, uGapB, uGapC, uWall, uLip;
+uniform float uIso, uGloss, uFres, uDomeW, uIsoBand, uShell;
+uniform vec3 uShadowCol; uniform float uShadowMix, uShadowAmt; uniform vec2 uShadowOff;
 uniform vec4 uBead; uniform vec2 uBeadDir; uniform vec3 uBeadCol, uBeadShadow;
-uniform vec4 uFlowW;    // poids des 2 phases de coordonnées entraînées
-uniform vec4 uFlowOff;  // décalages aléatoires des 2 phases
 
-const vec3 LDIR = normalize(vec3(0.35, 0.55, 0.75));   // lumière en haut à droite : ombre en bas à gauche
+const vec3 LDIR = normalize(vec3(0.35, 0.55, 0.75));   // lumière en haut à droite : ombres en bas à gauche
+const vec2 LXY = vec2(0.5369, 0.8437);
 
-// reflet d'un softbox de studio (fenêtre lumineuse en haut à droite)
-float softbox(vec3 n){
+// reflets du studio : une fenêtre lumineuse en haut à droite, une ambiance bleu-cyan tout autour
+float softbox(vec3 n){ vec3 r = reflect(vec3(0,0,-1), n); vec2 a = r.xy - vec2(0.30, 0.48);
+  return smoothstep(0.16, 0.10, abs(a.x)) * smoothstep(0.07, 0.035, abs(a.y)); }
+float softboxWide(vec3 n){ vec3 r = reflect(vec3(0,0,-1), n); vec2 a = r.xy - vec2(0.30, 0.42);
+  return smoothstep(0.30, 0.16, abs(a.x)) * smoothstep(0.20, 0.10, abs(a.y)); }
+vec3 envSky(vec3 n){
   vec3 r = reflect(vec3(0,0,-1), n);
-  vec2 a = r.xy - vec2(0.30, 0.48);
-  return smoothstep(0.16, 0.10, abs(a.x)) * smoothstep(0.07, 0.035, abs(a.y));
+  float side = clamp(1.0 - r.z, 0., 1.);
+  vec3 c = mix(vec3(0.12, 0.26, 0.50), vec3(0.32, 0.80, 1.0), smoothstep(0.05, 0.55, side));
+  return c * (0.80 + 0.45*clamp(dot(normalize(r.xy + 1e-5), vec2(-0.5, -0.86)), 0., 1.));
 }
-float softboxWide(vec3 n){
-  vec3 r = reflect(vec3(0,0,-1), n);
-  vec2 a = r.xy - vec2(0.30, 0.42);
-  return smoothstep(0.30, 0.16, abs(a.x)) * smoothstep(0.20, 0.10, abs(a.y));
-}
-float fbm3(vec2 p){ float s=0., a=.5; for(int i=0;i<3;i++){ s+=a*noise(p); p=mat2(1.6,1.2,-1.2,1.6)*p+vec2(3.1,7.7); a*=.5; } return s/0.875; }
-// champ lisse qui serpente : ses lignes de niveau sont des méandres et des boucles (pas de zigzags)
-float meander(vec2 p){
-  vec2 w = vec2(noise(p*0.8 + 1.7), noise(p*0.8 + 8.3)) - 0.5;
-  p += w * 0.9;
-  return 0.68*noise(p*1.5) + 0.32*noise(p*3.1 + 5.2);
+float fresnel(vec3 n){ return 0.04 + 0.96*pow(1.0 - clamp(n.z, 0., 1.), 2.2); }
+
+// hauteur de la nappe : chaque liquide a son épaisseur (une couche en recouvre une autre)
+float liqH(vec4 f){
+  float f0 = 1.0 - (f.x + f.y + f.z + f.w);
+  float mx = max(max(max(f.x, f.y), max(f.z, f.w)), f0);
+  vec4 e4 = exp((f - mx) * 9.0); float e0 = exp((f0 - mx) * 9.0);
+  return (e0*uLiqH0 + dot(e4, uLiqH)) / (e0 + e4.x + e4.y + e4.z + e4.w);
 }
 
-// la goutte rose repousse le motif autour d'elle (déplacement qui conserve la surface :
-// le motif est écrasé contre la goutte rose, comme dans la vidéo)
+// la goutte rose repousse le motif autour d'elle (déplacement qui conserve la surface)
 vec2 beadWarp(vec2 p){
   if (uBead.w < 0.01) return p;
   vec2 asp = vec2(uAspect, 1.);
@@ -435,24 +607,6 @@ vec2 beadWarp(vec2 p){
   float Rb = uBead.z * uBead.w * 0.95;
   float r2 = sqrt(max(r*r - Rb*Rb, 0.));
   return uBead.xy + d * (r2 / max(r, 1e-5)) / asp;
-}
-
-// monde -> repère de la goutte. Quand elle est traînée, le motif s'étire vers l'arrière
-// (la silhouette reste ronde mais son arrière s'effiloche en traînées), comme le bas de la goutte dans la vidéo.
-// Renvoie la coordonnée du motif ; mUv = coordonnée de la silhouette.
-vec2 blobMap(vec2 p, out float tail, out vec2 mUv){
-  vec2 asp = vec2(uAspect, 1.);
-  vec2 d = (p - uHero.xy) * asp;
-  vec2 u = uHeroDir, v = vec2(-u.y, u.x);
-  float R = uHero.z, a = dot(d, u), b = dot(d, v), k = uHero.w;
-  float tz = smoothstep(0.25*R, -1.0*R, a);
-  tail = tz * k;
-  float ap = a / mix(1.0 + 0.06*k, 1.0 + 1.4*k, tz);
-  float bp = b * (1.0 + 0.04*k) + tail * 0.010 * sin(a/R*16.0 + uTime*2.5);
-  float am = a / (1.0 + 0.10*k*tz);
-  am += tail * (noise(vec2(b/R*13.0, 0.5)) - 0.5) * 0.24 * R * smoothstep(-0.45*R, -0.95*R, a);
-  mUv = 0.5 + (am*u + b*v) / asp;
-  return 0.5 + (ap*u + bp*v) / asp;
 }
 
 // particules sombres en suspension (dessinées nettes, dans les coordonnées entraînées par le liquide)
@@ -475,264 +629,196 @@ float specks(vec2 fu, float dens){
 void main(){
   vec2 uv = toWorld(vUv, uAspect);
   vec2 asp = vec2(uAspect, 1.);
-  vec2 vel = texture(uVel, uv).xy * uVelTexel;
 
-  // ---------- gouttes d'huile / bulles (lentilles transparentes) ----------
+  // ---------- grosses gouttes d'huile / bulles (lentilles), transportées par le courant ----------
   vec2 lens = vec2(0.); float dIn = 0., dRim = 0., dSpec = 0., dInner = 0.;
   if (uDrops > 0.01) {
-    for (int layer=0; layer<2; layer++){
-      float sc = layer==0 ? 2.0 : 4.2;
-      vec2 bp = uv*asp*sc + vec2(uTime*0.020, -uTime*0.013)*(1.0+float(layer)) - vel*0.15;
-      vec2 cell = floor(bp);
-      for (int j=-1;j<=1;j++) for (int i=-1;i<=1;i++){
-        vec2 c = cell + vec2(i,j);
-        vec3 h = hash3(c + float(layer)*17.0);
-        float alive = smoothstep(h.z, h.z+0.08, uDrops*(layer==0 ? 0.5 : 0.35));
-        if (alive <= 0.) continue;
-        vec2 center = c + 0.5 + 0.3*vec2(sin(uTime*0.15 + h.x*6.28), cos(uTime*0.12 + h.y*6.28));
-        float rad = (0.20 + 0.28*h.x) * alive * (layer==0 ? uDropStyle.x : 1.0);
-        vec2 d = bp - center;
-        d.x *= 1.0 + 0.25*(h.y-0.5);
-        float dist = length(d);
-        float soft = uDropStyle.z;
-        float inside = smoothstep(rad, rad - 0.02 - soft, dist);
-        if (inside > 0.) {
-          float z = sqrt(max(0., 1. - dist*dist/(rad*rad)));
-          lens += -d/rad * (1.0 - z) * inside * 0.10 / sc;
-          dIn = max(dIn, inside);
-          vec3 nn = normalize(vec3(d/rad, z*0.9));
-          dSpec = max(dSpec, smoothstep(0.93, 0.995, dot(nn, normalize(vec3(0.45, 0.6, 0.66)))) * inside);
-          dInner = max(dInner, smoothstep(rad*0.55, rad*0.95, dist) * inside * clamp(dot(normalize(d), vec2(-0.5,-0.6))*0.8+0.3, 0., 1.));
-        }
-        float rw = (0.035 + 0.05*rad) * uDropStyle.y;
-        float ring = smoothstep(rad + 0.012 + soft, rad - 0.004, dist) * smoothstep(rad - rw - 0.012 - soft, rad - rw, dist);
-        ring *= mix(0.65, 0.12, uRimDir) + mix(0.35, 0.88, uRimDir)*clamp(dot(normalize(d + 1e-5), vec2(-0.6, -0.7)) + 0.5, 0., 1.);
-        dRim = max(dRim, ring * alive);
+    for (int i=0; i<8; i++){
+      if (i >= uNBig) break;
+      vec4 pd = texelFetch(uP, ivec2(i, 0), 0);
+      float alive = smoothstep(0.0, 2.0, uClock - pd.w) * smoothstep(float(i)/8.0, float(i)/8.0 + 0.10, uDrops);
+      if (alive <= 0.) continue;
+      float rad = pd.z * uDropStyle.x * (0.6 + 0.4*alive);
+      vec2 d = (uv - pd.xy) * asp;
+      float hx = fract(pd.z*97.13);
+      d.x *= 1.0 + 0.22*(hx - 0.5);
+      float dist = length(d);
+      float soft = uDropStyle.z * 0.5;
+      float inside = smoothstep(rad, rad - 0.008 - soft, dist) * alive;
+      if (inside > 0.) {
+        float z = sqrt(max(0., 1. - dist*dist/(rad*rad)));
+        lens += -d/rad * (1.0 - z) * inside * 0.05;
+        dIn = max(dIn, inside);
+        vec3 nn = normalize(vec3(d/rad, z*0.9));
+        dSpec = max(dSpec, smoothstep(0.93, 0.995, dot(nn, normalize(vec3(0.45, 0.6, 0.66)))) * inside);
+        dInner = max(dInner, smoothstep(rad*0.55, rad*0.95, dist) * inside * clamp(dot(normalize(d), vec2(-0.5,-0.6))*0.8+0.3, 0., 1.));
       }
+      float rw = (0.0175 + 0.05*rad) * uDropStyle.y;
+      float ring = smoothstep(rad + 0.006 + soft, rad - 0.002, dist) * smoothstep(rad - rw - 0.006 - soft, rad - rw, dist);
+      ring *= mix(0.65, 0.12, uRimDir) + mix(0.35, 0.88, uRimDir)*clamp(dot(normalize(d + 1e-5), vec2(-0.6, -0.7)) + 0.5, 0., 1.);
+      dRim = max(dRim, ring * alive);
     }
   }
   vec2 suv = uv + lens / asp;
 
-  // ---------- surface du liquide (décor) ----------
-  vec2 e = uDyeTexel * 2.5;
-  float lC = lum(texture(uDye, suv).rgb);
-  float lR = lum(texture(uDye, suv + vec2(e.x,0)).rgb), lL = lum(texture(uDye, suv - vec2(e.x,0)).rgb);
-  float lT = lum(texture(uDye, suv + vec2(0,e.y)).rgb), lB = lum(texture(uDye, suv - vec2(0,e.y)).rgb);
-  vec2 gl2 = vec2(lR - lL, lT - lB);
-  vec3 nb = normalize(vec3(-gl2*9.0, 1.0));
-  vec2 ruv = suv + nb.xy * 0.006;
-  vec4 dy = texture(uDye, ruv);
-  vec3 bg = dy.rgb;
-  float thick = smoothstep(0.75, 0.25, lum(bg));
-  bg = mix(bg, bg*bg*1.1, thick*0.35);
+  // ---------- le décor : nappes de liquides de couleurs franches ----------
+  vec4 f = texture(uLiq, suv);
+  float f0 = 1.0 - (f.x + f.y + f.z + f.w);
+  // liquide dominant, bords nets anticrénelés
+  float s0 = f0 - max(max(f.x, f.y), max(f.z, f.w));
+  vec4 s14 = vec4(f.x - max(max(f0, f.y), max(f.z, f.w)), f.y - max(max(f0, f.x), max(f.z, f.w)),
+                  f.z - max(max(f0, f.x), max(f.y, f.w)), f.w - max(max(f0, f.x), max(f.y, f.z)));
+  float w0 = clamp(0.5 + s0 / (2.0*max(fwidth(s0), 1e-4)), 0., 1.);
+  vec4 w14 = clamp(0.5 + s14 / (2.0*max(fwidth(s14), vec4(1e-4))), 0., 1.);
+  float ws = w0 + w14.x + w14.y + w14.z + w14.w + 1e-4;
+  w0 /= ws; w14 /= ws;
+  vec3 sharp = w0*uBase + w14.x*uLiqCol[0] + w14.y*uLiqCol[1] + w14.z*uLiqCol[2] + w14.w*uLiqCol[3];
+  vec3 mixc = f0*uBase + f.x*uLiqCol[0] + f.y*uLiqCol[1] + f.z*uLiqCol[2] + f.w*uLiqCol[3];
+  vec3 bg = mix(sharp, mixc, 0.18);
 
   // coordonnées entraînées par le liquide (2 phases fondues)
   vec4 fl = texture(uFlowUV, suv);
   vec2 fA = fl.xy + uFlowOff.xy, fB = fl.zw + uFlowOff.zw;
-
+  // encre rouge tachetée (marbrure entraînée par le courant)
+  if (uMottle > 0.01) {
+    float mt = uFlowW.x*fbm3(fA*asp*7.0) + uFlowW.y*fbm3(fB*asp*7.0);
+    float mt2 = uFlowW.x*noise(fA*asp*26.0) + uFlowW.y*noise(fB*asp*26.0);
+    vec3 mot = mix(vec3(0.62, 0.50, 0.55), vec3(1.22, 1.10, 1.0), smoothstep(0.30, 0.75, mt)) * (0.92 + 0.16*mt2);
+    bg = mix(bg, bg*mot, (w14.y + 0.5*w14.w) * uMottle);
+  }
   // particules sombres
+  vec4 ax = texture(uAux, suv);
   if (uSpeck > 0.01) {
-    float dens = (0.035 + 0.30*smoothstep(0.04, 0.45, dy.a)) * uSpeck;
+    float dens = (0.02 + 0.35*smoothstep(0.03, 0.45, ax.g)) * uSpeck;
     float sp = uFlowW.x*specks(fA, dens) + uFlowW.y*specks(fB, dens);
     bg = mix(bg, uSpeckCol, clamp(sp, 0., 1.)*0.85);
   }
 
-  // lignes de lumière blanc-cyan qui serpentent dans le liquide (bords des couches de liquide, vidéo 1,0 à 1,5 s)
-  float glowC = 0., glowH = 0.;
-  if (uGlow > 0.01) {
-    float F = uFlowW.x*meander(fA*asp) + uFlowW.y*meander(fB*asp);
-    F += (lum(dy.rgb) - lum(uBase)) * 0.10;
-    float fw = max(fwidth(F), 1e-5);
-    float pres = smoothstep(0.30, 0.60, uFlowW.x*noise(fA*asp*0.9 + 4.0) + uFlowW.y*noise(fB*asp*0.9 + 4.0));
-    float d = abs(F - 0.5) / fw;                 // distance à la ligne, en pixels
-    float wv = 2.0 * uPx * (0.55 + 0.9*noise(fA*asp*2.2 + 5.3));
-    glowC = 1.0 - smoothstep(wv, wv + 1.3, d);
-    glowH = exp(-pow(d / (wv*2.6 + 3.0*uPx), 2.0));
-    glowC *= pres * uGlow; glowH *= pres * uGlow;
+  // relief des nappes : la couche la plus épaisse projette une ombre, ses bords reflètent le studio
+  vec2 e = uLiqTexel * 1.5;
+  float hC = liqH(f);
+  float hR = liqH(texture(uLiq, suv + vec2(e.x, 0.))), hL = liqH(texture(uLiq, suv - vec2(e.x, 0.)));
+  float hT = liqH(texture(uLiq, suv + vec2(0., e.y))), hB = liqH(texture(uLiq, suv - vec2(0., e.y)));
+  vec2 gh = vec2(hR - hL, hT - hB);
+  vec3 nl = normalize(vec3(-gh * 2.4, 1.0));
+  float shL = 0.;
+  for (int k=1;k<=3;k++){
+    vec2 oo = LXY / asp * (0.011 * float(k));
+    shL = max(shL, (liqH(texture(uLiq, suv + oo)) - hC) * (1.0 - 0.2*float(k)));
   }
+  bg *= 1.0 - smoothstep(0.0, 0.6, shL) * 0.42;
+  float difL = dot(nl, LDIR) / LDIR.z;
+  bg *= mix(1.0, clamp(difL, 0.45, 1.2), 0.85);
+  float Fl = fresnel(nl);
+  bg = mix(bg, envSky(nl)*1.15, clamp(Fl*1.6, 0., 0.8));
+  bg += vec3(1.0, 0.98, 0.95) * softbox(nl) * 0.9;
 
-  // reflets blancs sur l'huile ondulée (état ambré)
-  float bgG = 0.;
-  if (uBgGloss > 0.01) {
-    vec2 pa = fA*asp*2.0, pb = fB*asp*2.0; float h = 0.02;
-    float h0 = uFlowW.x*fbm3(pa) + uFlowW.y*fbm3(pb);
-    float hx = uFlowW.x*fbm3(pa + vec2(h,0.)) + uFlowW.y*fbm3(pb + vec2(h,0.));
-    float hy = uFlowW.x*fbm3(pa + vec2(0.,h)) + uFlowW.y*fbm3(pb + vec2(0.,h));
-    vec3 nw = normalize(vec3(-(hx - h0)/h*0.22, -(hy - h0)/h*0.22, 1.0));
-    bgG = softbox(nw) * uBgGloss;
-  }
+  // fils de peinture blanche (étirés et repliés par le courant)
+  float S = bicubic(uAux, suv, 1.0/uAuxTexel).r;
+  float fwS = max(fwidth(S), 1e-4);
+  float core = smoothstep(0.40 - fwS, 0.40 + fwS, S);
+  float halo = smoothstep(0.06, 0.40, S);
+  bg = mix(bg, mix(uLineCol, vec3(0.75, 0.95, 1.0), 0.15), clamp(halo*0.35, 0., 1.));
+  bg = mix(bg, vec3(1.0, 0.99, 1.0), core*0.92);
 
-  // ---------- la goutte à motifs ----------
+  // ---------- la goutte à motifs (dans son repère) ----------
   vec2 msz = 1.0 / uMatTexel;
-  float tail; vec2 suv2;
-  vec2 buv = blobMap(beadWarp(ruv), tail, suv2);
-  // masque flouté : dôme (0 au bord -> 1 au coeur) et direction vers l'extérieur
-  float B0 = texture(uShadow, suv2).r;
+  vec2 lcw = (beadWarp(suv) - uFrameC) / uFrameS + 0.5;
+  float B0 = texture(uShadow, lcw).r;
   vec2 bq = uShadowTexel;
-  vec2 gB = vec2(texture(uShadow, suv2 + vec2(bq.x,0)).r - texture(uShadow, suv2 - vec2(bq.x,0)).r,
-                 texture(uShadow, suv2 + vec2(0,bq.y)).r - texture(uShadow, suv2 - vec2(0,bq.y)).r);
+  vec2 gB = vec2(texture(uShadow, lcw + vec2(bq.x,0)).r - texture(uShadow, lcw - vec2(bq.x,0)).r,
+                 texture(uShadow, lcw + vec2(0,bq.y)).r - texture(uShadow, lcw - vec2(0,bq.y)).r);
   vec2 nOut = -gB / (length(gB) + 1e-4);
-  float dome = smoothstep(0.5, 0.97, B0);
-  float rimW = 1.0 - dome;
-  // bord net de la goutte
-  float mk = bicubic(uPrep, suv2, msz).w;
+  float dome = smoothstep(0.5, 0.97, B0), rimW = 1.0 - dome;
+  float mk = bicubic(uPrep, lcw, msz).w;
   float aw = max(fwidth(mk), 1e-4);
   float m = smoothstep(0.5 - aw*0.75, 0.5 + aw*0.75, mk);
   float edgePx = (mk - 0.5) / aw;
-  // effet dôme : près du bord le motif est comprimé (on voit la paroi bombée en biais)
-  vec2 puv = buv + nOut * rimW * rimW * uDomeW * uMatTexel;
+  // effet dôme : près du bord le motif est comprimé (la paroi bombée est vue en biais)
+  vec2 puv = lcw + nOut * rimW * rimW * uDomeW * uMatTexel;
   vec4 pp = bicubic(uPrep, puv, msz);
   float Vv = pp.x; vec2 g = pp.yz; float gV = length(g) + 1e-5;
   vec2 q = puv * msz;
   float px = max(length(fwidth(q)), 1e-3);
-  float iso = uIso * (0.65 + 0.7*noise(q*0.06 + 3.1)) * (0.75 + 0.5*noise(q*0.16 + 8.)) * (0.92 + 0.16*noise(q*0.5));
-  // état ambré : bandes sombres (huile olive) entre les groupes de perles
-  iso *= 1.0 + uIsoBand * 7.0 * smoothstep(0.44, 0.62, fbm(q*0.013 + 3.3));
-  float sd = (Vv - iso) / gV;                    // distance signée au bord du ver (texels), > 0 dedans
-
-  // vers : peinture plate légèrement marbrée, biseau sombre, reflets mouillés
+  float iso = uIso * (0.65 + 0.7*noise(q*0.08 + 3.1)) * (0.75 + 0.5*noise(q*0.2 + 8.)) * (0.92 + 0.16*noise(q*0.6));
+  iso *= 1.0 + uIsoBand * 7.0 * smoothstep(0.44, 0.62, fbm(q*0.02 + 3.3));
+  float sd = (Vv - iso) / gV;          // distance signée au bord du ver (texels), > 0 dedans
   vec2 gdir = g / gV;
+  // couleur du ver (tirée de son identité)
   float wid = texelFetch(uMat, ivec2((puv + gdir*0.5*uMatTexel) * msz), 0).a;
   uint hh = uint(wid) * 747796405u + 2891336453u; hh ^= hh >> 16; hh *= 0x7feb352du; hh ^= hh >> 15;
-  float cat = float(hh & 0xffffu) / 65535.0;   // 48 % corail, 34 % moutarde, 18 % olive
-  vec3 base = cat < 0.48 ? uCell[0] : (cat < 0.82 ? uCell[1] : uCell[2]);
-  base *= 0.9 + 0.2*fbm(q*0.15);
-  base = mix(base, base*vec3(0.78,0.86,0.95), smoothstep(0.55, 0.85, fbm(q*0.05 + 5.))*0.8);
-  float t = clamp(sd / 1.6, 0., 1.);
-  float slope = (1. - t) / sqrt(max(1. - (1.-t)*(1.-t), 0.05));
-  vec3 n = normalize(vec3(-gdir*slope*0.75 + nOut*rimW*rimW*1.4, 1.0));
-  float dif = clamp(dot(n, LDIR), 0., 1.);
-  vec3 worm = base * (0.80 + 0.25*dif);
-  worm *= 0.45 + 0.55*smoothstep(0.0, 0.9, sd);
-  float wet = smoothstep(0.45, 0.75, noise(q*0.03 + 9.));
-  worm += vec3(1.0, 0.98, 0.95) * (softbox(n)*(0.45 + 0.55*wet) + softboxWide(n)*0.12) * uGloss;
-
-  // sillons : noir contre les vers, bleu nuit, fines lignes cyan irrégulières
+  float cat = float(hh & 0xffffu) / 65535.0;   // 36 % corail, 42 % moutarde, 22 % olive
+  vec3 base = cat < 0.36 ? uCell[0] : (cat < 0.78 ? uCell[1] : uCell[2]);
+  base *= 0.92 + 0.16*fbm(q*0.2);
+  // relief : vers bombés, sillons remplis de liquide clair qui remonte contre les vers (ménisque)
   float lam = clamp(Vv / gV, 0.6, 5.0);
-  float dl = lam * log(iso / max(Vv, 1e-4));
-  dl += (noise(q*0.35) - 0.5) * 1.6;
-  vec3 gap = mix(uGap, uGap2, smoothstep(0.35, 0.85, noise(q*0.10)) * smoothstep(1.0, 3.0, dl));
-  gap = mix(uLine, gap, smoothstep(0.4, 1.4, dl));
-  float lw = 0.42*px + 0.07;
-  float l1 = 1.0 - smoothstep(lw - px*0.5, lw + px*0.5, abs(dl - 2.5));
-  float l2 = 1.0 - smoothstep(lw - px*0.5, lw + px*0.5, abs(dl - 4.3));
-  float glow = exp(-pow((dl - 2.5)/0.7, 2.)) + 0.6*exp(-pow((dl - 4.3)/0.7, 2.));
-  float neonBoost = 1.0 + 1.6*tail + 0.8*rimW*rimW;
-  gap += (uNeon * (l1 + 0.45*l2) * 0.95 + vec3(0.04, 0.18, 0.48) * glow * (0.18 + 0.9*tail)) * uNeonAmt * neonBoost;
-  // petites perles dans les grands sillons
-  vec2 cq = q / 6.0; vec2 ci = floor(cq);
-  for (int j=-1;j<=1;j++) for (int i=-1;i<=1;i++){
-    vec2 c = ci + vec2(i,j);
-    float h1 = hash(c*1.7 + 3.1), h2 = hash(c*2.3 + 7.7), h3 = hash(c*3.1 + 1.3);
-    if (h3 > 0.30) continue;
-    vec2 cp = (c + 0.2 + 0.6*vec2(h1, h2)) * 6.0;
-    float r = 0.35 + 1.1*pow(hash(c + 5.5), 2.0);
-    float dd = length(q - cp);
-    float dotIn = (1.0 - smoothstep(r - px*0.6, r + px*0.6, dd)) * smoothstep(1.2, 2.2, dl);
-    float ring = (1.0 - smoothstep(0.12 + px*0.4, 0.12 + px*1.0, abs(dd - r - 0.45))) * smoothstep(1.0, 2.0, dl);
-    gap = mix(gap, uNeon*0.9, ring*0.6*uNeonAmt);
-    gap = mix(gap, mix(uCell[2], uCell[1], h1)*0.9, dotIn);
-  }
+  float dl = lam * log(iso / max(Vv, 1e-4)) + (noise(q*0.5) - 0.5) * 0.9;   // distance dans le sillon (texels)
+  float tw = clamp(sd / 2.0, 0., 1.);
+  float slope = sd > 0. ? (1.0 - tw) * 1.3 : exp(-max(dl, 0.)*1.1) * 0.75;
+  vec3 n = normalize(vec3(-gdir * slope + nOut * rimW * 1.6, 1.0));
+  float dif = clamp(dot(n, LDIR), 0., 1.) / LDIR.z;
+  vec3 worm = base * (0.84 + 0.18*dif);
+  worm *= 0.62 + 0.38*smoothstep(0.0, 1.0, sd);
+  // sillon : contour noir contre le ver, puis bleu nuit, bleu, bleu clair au milieu des grands sillons
+  vec3 gap = mix(uGapA, uGapB, smoothstep(1.7, 2.7, dl));
+  gap = mix(gap, uGapC, smoothstep(2.8, 4.6, dl) * (0.45 + 0.55*noise(q*0.15 + 4.0)));
+  // ménisque : le liquide du sillon remonte contre le contour et reflète le ciel en filets clairs
+  float men = exp(-pow((dl - 2.25)/0.45, 2.0)) * smoothstep(0.35, 0.70, noise(q*0.11 + 2.0 + uTime*0.05));
+  gap = mix(gap, mix(uGapC, vec3(0.92, 0.98, 1.0), 0.5), men * 0.85);
+  gap = mix(uOutline, gap, smoothstep(1.05, 1.95, dl));
   float cov = smoothstep(-0.5*px, 0.5*px, sd);
-  // traînée : le liquide qui file reflète une lumière cyan intense (bas de la goutte dans la vidéo)
-  float tg = clamp(tail*1.6, 0., 1.) * uNeonAmt;
-  float sn = noise(vec2(dot(q, vec2(-uHeroDir.y, uHeroDir.x))*0.22, 0.5));
-  vec3 cy = mix(vec3(0.10, 0.80, 0.95), uNeon, 0.35);
-  gap = mix(gap, cy*(0.75 + 0.65*sn) + uNeon*l1*0.6, tg*0.85);
-  worm = mix(worm, worm*0.75, tg*0.5);
-  worm += cy * tg * (0.15 + 0.55*smoothstep(0.55, 0.9, sn)) * (1.0 - smoothstep(0.3, 2.2, sd));
-  // état ambré : traînées vert olive translucides dans l'huile sombre entre les perles
-  if (uShell > 0.01) {
-    vec2 sq = mat2(0.8, 0.6, -0.6, 0.8) * q;
-    float olv = smoothstep(0.55, 0.80, noise(sq*vec2(0.018, 0.10) + 4.0)) * smoothstep(0.6, 2.5, dl);
-    gap = mix(gap, vec3(0.36, 0.40, 0.08), olv * 0.75 * uShell);
-  }
   vec3 bcol = mix(gap, worm, cov);
-
-  // paroi du dôme : côté à l'ombre plus sombre, reflet cyan sur le bas, grand reflet doux en haut
-  vec3 nM = normalize(vec3(nOut * rimW * 1.3, 1.0));
-  vec3 rM = reflect(vec3(0,0,-1), nM);
-  bcol *= 1.0 - 0.30*rimW*clamp(dot(nOut, -normalize(LDIR.xy)) + 0.4, 0., 1.);
-  bcol += uNeon * rimW*rimW * smoothstep(0.0, -0.5, rM.y) * 0.30 * uNeonAmt;
-  bcol += vec3(1.0, 0.99, 0.96) * softboxWide(nM) * 0.35 * uGloss;
+  // reflets : ambiance bleue plus forte là où la surface penche (Fresnel), fenêtre blanche nette
+  float F = fresnel(n) * uFres;
+  bcol = mix(bcol, envSky(n), clamp(F, 0., mix(0.30, 0.85, cov)));
+  // liseré clair sur le flanc des vers tourné vers la lumière
+  float rimHL = smoothstep(0.3, 1.0, sd) * (1.0 - smoothstep(1.2, 2.6, sd)) * clamp(dot(-gdir, LXY)*1.4 - 0.2, 0., 1.);
+  bcol += vec3(1.0, 0.96, 0.88) * rimHL * 0.22 * uGloss * cov;
+  float wet = smoothstep(0.40, 0.75, noise(q*0.04 + 9.));
+  bcol += vec3(1.0, 0.99, 0.96) * (softbox(n)*(0.75 + 0.45*wet) + softboxWide(n)*0.14) * uGloss;
   // film liquide sur la goutte : grands reflets mouillés
-  vec2 fe = vec2(2.0, 0.);
-  float h0 = noise(q*0.012), hx = noise((q + fe.xy)*0.012), hy = noise((q + fe.yx)*0.012);
-  vec3 nf = normalize(vec3(-(hx - h0)*14., -(hy - h0)*14., 1.));
-  vec3 rf = reflect(vec3(0,0,-1), nf);
-  bcol += vec3(0.75, 0.95, 1.0) * smoothstep(0.30, 0.12, length((rf.xy - vec2(0.25, 0.35))*vec2(1.0, 1.6))) * 0.30 * uGloss * (1.0 - uShell);
-
-  // coque d'huile ambrée (état 3) : le motif est vu à travers une huile brun olive, plus épaisse vers le bord,
-  // reflets blancs nets sur le dessus, teinte verte par endroits
+  {
+    vec2 fe = vec2(2.0, 0.);
+    float h0 = noise(q*0.02), hx = noise((q + fe.xy)*0.02), hy = noise((q + fe.yx)*0.02);
+    vec3 nf = normalize(vec3(-(hx - h0)*10. + nOut.x*rimW*1.2, -(hy - h0)*10. + nOut.y*rimW*1.2, 1.));
+    bcol += vec3(0.80, 0.95, 1.0) * softboxWide(nf) * 0.10 * uGloss * (1.0 - uShell);
+  }
+  // huile ambrée (état 3) : le motif est vu à travers une huile brun sombre, plus épaisse vers le bord
   if (uShell > 0.01) {
     float th = 0.55 + 0.45*rimW;
     bcol *= mix(vec3(1.0), vec3(0.80, 0.52, 0.22), uShell*th);
-    bcol = mix(bcol, vec3(0.26, 0.12, 0.03), smoothstep(0.88, 0.58, B0) * 0.70 * uShell);
-    bcol = mix(bcol, vec3(0.17, 0.08, 0.02), uShell*rimW*rimW*0.60);
-    float gz = smoothstep(0.58, 0.80, fbm(q*0.018 + 11.)) * uShell;
+    bcol = mix(bcol, vec3(0.20, 0.09, 0.02), smoothstep(0.88, 0.58, B0) * 0.65 * uShell);
+    float gz = smoothstep(0.58, 0.80, fbm(q*0.025 + 11.)) * uShell;
     bcol = mix(bcol, bcol*vec3(0.50, 1.00, 0.40) + vec3(0.02, 0.07, 0.0), gz*0.55);
-    vec2 wv = (vec2(fbm3(q*0.035 + 2.), fbm3(q*0.035 + 9.)) - 0.5) * 0.35;
+    vec2 wv = (vec2(fbm3(q*0.05 + 2.), fbm3(q*0.05 + 9.)) - 0.5) * 0.35;
     vec3 nS = normalize(vec3(nOut*rimW*2.0 + wv*(0.4 + rimW), 1.0));
     bcol += vec3(1.0, 0.98, 0.92) * softbox(nS) * uShell * 1.3;
     bcol += vec3(1.0, 0.85, 0.55) * softboxWide(nS) * uShell * 0.18;
-    // reflet blanc épais, en traînées, le long du bord éclairé (huile épaisse et brillante)
-    vec2 dc = (suv2 - 0.5)*asp;
-    float angS = atan(dc.y, dc.x);
-    float litS = smoothstep(0.25, 0.85, dot(nOut, normalize(vec2(0.45, 0.89))));
-    float bandS = exp(-pow((B0 - 0.72)/0.16, 2.0));
-    float strk = smoothstep(0.40, 0.70, noise(vec2(angS*7.0, B0*4.0 + 2.0))) * (0.6 + 0.4*noise(vec2(angS*23.0, 5.0)));
-    bcol = mix(bcol, vec3(1.0, 0.98, 0.92), clamp(litS * bandS * strk * uShell * 1.2, 0., 0.95));
   }
-
   // la goutte rose écrase le motif : bande sombre au contact
   if (uBead.w > 0.01) {
-    float rbd = length((ruv - uBead.xy)*asp) / (uBead.z*uBead.w*0.95 + 1e-5);
+    float rbd = length((suv - uBead.xy)*asp) / (uBead.z*uBead.w*0.95 + 1e-5);
     bcol = mix(bcol, uWall, (1.0 - smoothstep(1.0, 1.10, rbd)) * 0.9);
   }
-
   // bord : bande sombre + fin liseré clair (ménisque)
   float band = max(1.0 - smoothstep(0.53, 0.64, B0), 1.0 - smoothstep(2.0, 5.0, edgePx));
-  bcol = mix(bcol, uWall, band*0.88*(1.0 - clamp(tail*1.5, 0., 1.)));
-  float lip = exp(-pow((edgePx - 1.0)/1.0, 2.0)) * (0.30 + 0.70*clamp(dot(nOut, normalize(LDIR.xy))*1.2 + 0.4, 0., 1.));
-  bcol += uLip * lip * 0.55 * (1.0 - clamp(tail*1.5, 0., 1.));
+  bcol = mix(bcol, uWall, band*0.85);
+  bcol += envSky(normalize(vec3(nOut*1.4, 1.0))) * band * 0.35 * uFres;
+  float lip = exp(-pow((edgePx - 1.0)/1.0, 2.0)) * (0.30 + 0.70*clamp(dot(nOut, LXY)*1.2 + 0.4, 0., 1.));
+  bcol += uLip * lip * 0.55;
 
-  // ombre portée douce et teintée (la goutte est épaisse), décalée vers le bas à gauche
-  float tailS; vec2 sA, sB;
-  vec2 so = vec2(0.020, 0.036)/asp*uHero.z/0.33*uShadowOff;
-  blobMap(beadWarp(ruv + so), tailS, sA); blobMap(beadWarp(ruv + so*0.55), tailS, sB);
-  float sh = 0.6*texture(uShadow, sA).r + 0.4*texture(uShadow, sB).r;
-  float sk = clamp(sh*1.15, 0., 1.) * (1.0 - m);
-  // ombre : assombrit (états 0, 2, 3) ou teinte en bleu-violet (état 1, la lumière d'ambiance bleue y remonte)
-  bg = mix(bg * mix(vec3(1.0), uShadowCol, sk), mix(bg, uShadowCol, sk*0.85), uShadowMix);
-
-  // traînée d'encre striée derrière la goutte (orange et brun, comme sous la goutte dans la vidéo)
-  {
-    vec2 dh = (ruv - uHero.xy) * asp;
-    vec2 u = uHeroDir, v = vec2(-u.y, u.x);
-    float R = uHero.z, ta = dot(dh, u), tb = dot(dh, v);
-    float zone = smoothstep(1.15*R, 0.5*R, abs(tb)) * smoothstep(-0.55*R, -0.95*R, ta) * exp((ta + R)/(3.0*R)) * uHero.w * uTrail;
-    float st = noise(vec2(tb/R*16.0, ta/R*1.2 - uTime*0.15)) * 0.7 + noise(vec2(tb/R*40.0, ta/R*3.0)) * 0.3;
-    vec3 tc = mix(uTrailA, uTrailB, smoothstep(0.50, 0.72, st) * 0.85);
-    bg = mix(bg, tc, clamp(zone*1.8, 0., 0.95));
+  // ombre portée : grande, douce, décalée en bas à gauche (la goutte est épaisse)
+  float sh = 0.;
+  vec2 lc0 = (suv - uFrameC + uShadowOff) / uFrameS + 0.5;
+  for (int i=0;i<6;i++){
+    float a = float(i)*1.0472 + 0.3;
+    sh += texture(uShadow, lc0 + vec2(cos(a)/uAspect, sin(a)) * 0.028 / uFrameS).r;
   }
-
-  // ménisque lumineux qui longe la goutte déchirée (état 2)
-  if (uGlow > 0.01) {
-    float Bs = bicubic(uShadow, suv2, 1.0/uShadowTexel).r;
-    float fwB = max(fwidth(Bs), 1e-5);
-    float dB = abs(Bs - 0.10) / fwB;
-    float wB = 1.1 * uPx;
-    float brk = smoothstep(0.38, 0.62, noise(suv2*asp*4.0 + vec2(uTime*0.05, 1.7)));
-    glowC = max(glowC, (1.0 - smoothstep(wB, wB + 1.1, dB)) * brk * uGlow);
-    glowH = max(glowH, exp(-pow(dB/(wB*3.2 + 2.5*uPx), 2.0)) * brk * uGlow);
-  }
+  sh = smoothstep(0.02, 0.80, sh/6.0) * (1.0 - m);
+  bg = mix(bg * mix(vec3(1.0), uShadowCol, sh*uShadowAmt), mix(bg, uShadowCol, sh*uShadowAmt), uShadowMix);
 
   // ---------- composition ----------
-  vec3 col = bg * (0.97 + 0.03*nb.z);
-  col += vec3(1.0, 0.98, 0.94) * bgG * 0.85;
-  col = mix(col, uGlowCol, clamp(glowH, 0., 1.) * 0.78);
-  col = mix(col, vec3(1.0, 0.98, 1.0), clamp(glowC, 0., 1.) * 0.95);
-  col = mix(col, bcol, m);
+  vec3 col = mix(bg, bcol, m);
 
   // goutte rose mate, anneau de reflet blanc en « U », ombre mauve en bas à gauche
   if (uBead.w > 0.01) {
@@ -746,10 +832,8 @@ void main(){
     float ab = max(fwidth(eb), 1e-4);
     float inside = (1.0 - smoothstep(1.0 - ab, 1.0 + ab, eb)) * uBead.w;
     if (inside > 0.) {
-      float z = sqrt(max(0., 1. - eb*eb));
       vec2 pd = qb.x*dir + qb.y*per;
       vec2 pdn = pd / max(length(pd), 1e-4);
-      // peinture rose mate : presque plate, un peu plus claire en haut à gauche, bord plus sombre en bas à droite
       vec3 bc = uBeadCol * (0.97 + 0.06*dot(pdn, vec2(-0.6, 0.8))*eb);
       bc = mix(bc, uBeadCol*vec3(0.80, 0.76, 0.86), smoothstep(0.78, 1.0, eb) * clamp(dot(pdn, vec2(0.7, -0.7)) + 0.3, 0., 1.) * 0.8);
       float ang = dot(pdn, vec2(-0.35, -0.94));
@@ -765,49 +849,94 @@ void main(){
     col += mix(vec3(1.0,0.92,0.6), vec3(1.0), uDropStyle.w < 0.5 ? 1.0 : 0.0) * dInner * 0.15;
     col += vec3(1.0) * dSpec * uDropStyle.w;
   }
+  // éclairage du studio : un peu plus clair en haut à droite
+  col *= 0.93 + 0.12*smoothstep(-0.6, 0.7, dot(vUv - 0.5, vec2(0.55, 0.83)) * 1.6);
   o = vec4(min(col, vec3(1.6)), 1.0);
 }`;
 
-// --- post-traitement : flou de mouvement, flou de profondeur, bloom, aberration, grain ---
-const POST = HEAD + `
-uniform sampler2D uScene, uVel; uniform vec2 uTexel, uVelTexel; uniform float uTime, uAspect, uDof, uBloom, uShutter;
-uniform vec2 uFocus; uniform int uTaps;
+// --- petites bulles (sprites) : anneau clair, reflet, intérieur un peu plus sombre ---
+const SPRITE_VS = `#version 300 es
+precision highp float; precision highp sampler2D;
+uniform sampler2D uP; uniform vec4 uCam; uniform float uAspect, uH, uClock; uniform int uFirst;
+out float vR; out float vA; out float vSize;
 void main(){
-  // flou de mouvement le long du courant (comme la vidéo quand le liquide bouge vite)
+  vec4 p = texelFetch(uP, ivec2(gl_VertexID + uFirst, 0), 0);
+  vec2 asp = vec2(uAspect, 1.);
+  vec2 w = (p.xy - 0.5) * asp - uCam.zw;
+  float c = cos(uCam.y), s = sin(uCam.y);
+  w = mat2(c, -s, s, c) * w * uCam.x;
+  gl_Position = vec4(w / asp * 2.0, 0., 1.);
+  vR = max(p.z * uCam.x * uH, 0.8);
+  vSize = clamp(2.0*vR + 6.0, 2.0, 250.0);
+  gl_PointSize = vSize;
+  vA = smoothstep(0.0, 1.5, uClock - p.w);
+}`;
+const SPRITE_FS = `#version 300 es
+precision highp float;
+in float vR; in float vA; in float vSize; out vec4 o;
+uniform float uAmt; uniform vec3 uRingCol;
+void main(){
+  vec2 d = (gl_PointCoord - 0.5) * vSize; d.y = -d.y;
+  float r = length(d);
+  float rw = max(1.0, vR*0.20);
+  float ring = 1.0 - smoothstep(rw*0.5, rw*0.5 + 1.0, abs(r - (vR - rw*0.5)));
+  float inside = 1.0 - smoothstep(vR - 1.0, vR, r);
+  float lit = clamp(dot(d / max(r, 1e-3), vec2(-0.6, 0.8)) * 0.5 + 0.5, 0., 1.);
+  float hl = (1.0 - smoothstep(vR*0.16, vR*0.16 + 1.0, length(d - vec2(-0.38, 0.40)*vR))) * step(3.0, vR);
+  // couches prémultipliées : intérieur sombre, anneau clair, reflet
+  float aIn = 0.16 * inside;
+  vec3 c = vec3(0.10, 0.03, 0.05) * aIn; float a = aIn;
+  float aR = ring * (0.45 + 0.50*lit);
+  c = uRingCol*aR + c*(1.0 - aR); a = aR + a*(1.0 - aR);
+  c = vec3(1.0)*hl + c*(1.0 - hl); a = hl + a*(1.0 - hl);
+  float k = vA * uAmt;
+  o = vec4(c*k, a*k);
+}`;
+
+// --- post-traitement : flou de mouvement, flou de profondeur (macro), halo, grain ---
+const DOWN = HEAD + `
+uniform sampler2D uSrc; uniform vec2 uTexel;
+void main(){
+  vec3 c = texture(uSrc, vUv + uTexel*vec2(-1.,-1.)).rgb + texture(uSrc, vUv + uTexel*vec2(1.,-1.)).rgb
+         + texture(uSrc, vUv + uTexel*vec2(-1.,1.)).rgb + texture(uSrc, vUv + uTexel*vec2(1.,1.)).rgb;
+  o = vec4(c*0.25, 1.);
+}`;
+const BLUR = HEAD + `
+uniform sampler2D uSrc; uniform vec2 uDir;
+void main(){
+  vec3 c = texture(uSrc, vUv).rgb * 0.2270;
+  c += (texture(uSrc, vUv + uDir*1.3846).rgb + texture(uSrc, vUv - uDir*1.3846).rgb) * 0.3162;
+  c += (texture(uSrc, vUv + uDir*3.2308).rgb + texture(uSrc, vUv - uDir*3.2308).rgb) * 0.0703;
+  o = vec4(c, 1.);
+}`;
+const POST = HEAD + `
+uniform sampler2D uScene, uBlur, uVel; uniform vec2 uTexel, uVelTexel; uniform float uTime, uAspect, uDof, uBloom, uShutter;
+uniform vec2 uFocus, uFocusDir; uniform float uFocusR; uniform int uTaps;
+void main(){
+  // flou de mouvement le long du courant
   vec2 w = toWorld(vUv, uAspect);
   vec2 mb = texture(uVel, w).xy * uVelTexel * uCam.x * uShutter;
   float mbPx = length(mb / uTexel);
-  vec2 d = vUv - uFocus; d.x *= uAspect;
-  float r = clamp((length(d) - 0.30) * 1.8, 0., 1.) * uDof * 6.0;
   float nt = float(uTaps);
   vec3 col;
   if (mbPx > 1.5) {
     vec3 acc = vec3(0.);
     for (int i=0;i<uTaps;i++) acc += texture(uScene, vUv + mb * ((float(i)+0.5)/nt - 0.5)).rgb;
     col = acc / nt;
-  } else if (r > 0.6) {
-    vec3 acc = vec3(0.);
-    for (int i=0;i<uTaps;i++){
-      float a = float(i)*2.39996;
-      acc += texture(uScene, vUv + vec2(cos(a), sin(a)) * sqrt((float(i)+0.5)/nt) * r * uTexel).rgb;
-    }
-    col = acc / nt;
   } else col = texture(uScene, vUv).rgb;
-  vec3 bloom = vec3(0.);
-  if (uBloom > 0.01) {
-    for (int i=0;i<uTaps;i++){
-      float a = float(i)*2.39996 + 1.0;
-      vec2 off = vec2(cos(a), sin(a)) * sqrt((float(i)+0.5)/nt);
-      bloom += max(texture(uScene, vUv + off * 26.0 * uTexel).rgb - 0.95, 0.);
-    }
-  }
+  // flou de profondeur : net sur l'avant de la goutte, flou en s'éloignant et sur la traînée (objectif macro)
+  vec2 d = (vUv - uFocus) * vec2(uAspect, 1.);
+  float coc = smoothstep(uFocusR*0.75, uFocusR*2.0, length(d));
+  coc = max(coc, smoothstep(uFocusR*0.25, uFocusR*1.3, -dot(d, uFocusDir)) * 0.85);
+  vec3 bl = texture(uBlur, vUv).rgb;
+  col = mix(col, bl, clamp(coc * uDof, 0., 0.9));
+  col += max(bl - 0.82, 0.) * 0.8 * uBloom;
   vec2 ca = (vUv - 0.5) * 0.0025;
-  col.r = mix(col.r, texture(uScene, vUv + ca).r, 0.5);
-  col.b = mix(col.b, texture(uScene, vUv - ca).b, 0.5);
-  col += bloom / nt * 1.6 * uBloom;
+  col.r = mix(col.r, texture(uScene, vUv + ca).r, 0.4*(1.0 - coc));
+  col.b = mix(col.b, texture(uScene, vUv - ca).b, 0.4*(1.0 - coc));
   col = clamp(col, 0., 1.);
-  col = mix(col, col*col*(3.0-2.0*col), 0.15);
-  vec2 v = vUv - 0.5; col *= 1.0 - dot(v,v)*0.18;
+  col = mix(col, col*col*(3.0-2.0*col), 0.18);
+  vec2 v = vUv - 0.5; col *= 1.0 - dot(v,v)*0.20;
   col += (hash(vUv*vec2(1920.,1080.) + fract(uTime*7.)*100.) - 0.5) * 0.018;
   o = vec4(clamp(col, 0., 1.), 1.);
 }`;
@@ -818,9 +947,9 @@ function compile(type, src){
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { console.error(src.split('\n').map((l,i)=>(i+1)+': '+l).join('\n')); throw new Error(gl.getShaderInfoLog(s)); }
   return s;
 }
-function program(frag){
+function program(frag, vert){
   const p = gl.createProgram();
-  gl.attachShader(p, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vert || VERT));
   gl.attachShader(p, compile(gl.FRAGMENT_SHADER, frag));
   gl.bindAttribLocation(p, 0, 'aPos'); gl.linkProgram(p);
   if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
@@ -831,19 +960,26 @@ function program(frag){
 const P = {
   advect: program(ADVECT), forces: program(FORCES), curl: program(CURL), vort: program(VORT),
   div: program(DIVERGENCE), scale: program(SCALE), pressure: program(PRESSURE), grad: program(GRADSUB),
-  dye: program(DYE), flowuv: program(FLOWUV), mat: program(MAT), rd: program(RD), prep: program(PREP), shadow: program(SHADOW), scene: program(SCENE), post: program(POST),
+  liq: program(LIQ), aux: program(AUX), flowuv: program(FLOWUV), mat: program(MAT), rd: program(RD), prep: program(PREP),
+  shadow: program(SHADOW), blurm: program(BLURM), reduce: program(REDUCE), part: program(PART), scene: program(SCENE),
+  sprite: program(SPRITE_FS, SPRITE_VS), down: program(DOWN), blur: program(BLUR), post: program(POST),
 };
 
+const quadVao = gl.createVertexArray();
+gl.bindVertexArray(quadVao);
 const vbo = gl.createBuffer();
 gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
 gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
 gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+const pointVao = gl.createVertexArray();   // sprites : aucun attribut, tout vient de la texture des particules
+gl.bindVertexArray(quadVao);
 
-function target(w, h, internal, format, data){
+function target(w, h, internal, format, data, filter){
   const tex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, tex);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  const fl = filter || gl.LINEAR;
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, fl);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, fl);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, gl.FLOAT, data || null);
@@ -854,11 +990,12 @@ function target(w, h, internal, format, data){
   return { tex, fbo, w, h, texel: [1/w, 1/h] };
 }
 function free(t){ if (t) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fbo); } }
-function pair(w, h, internal, format, data){
-  return { a: target(w,h,internal,format,data), b: target(w,h,internal,format,data), w, h, texel: [1/w,1/h], swap(){ const t=this.a; this.a=this.b; this.b=t; } };
+function pair(w, h, internal, format, data, filter){
+  return { a: target(w,h,internal,format,data,filter), b: target(w,h,internal,format,data,filter), w, h, texel: [1/w,1/h], swap(){ const t=this.a; this.a=this.b; this.b=t; } };
 }
 function freePair(p){ if (p) { free(p.a); free(p.b); } }
-let cam = [1.2, 0, 0, 0];
+let cam = [1.1, 0, 0, 0];
+let unit = 0;
 function pass(prog, dst, set){
   gl.useProgram(prog.p);
   gl.bindFramebuffer(gl.FRAMEBUFFER, dst ? dst.fbo : null);
@@ -868,25 +1005,27 @@ function pass(prog, dst, set){
   set(prog.u);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
-let unit = 0;
 function tex(loc, t){ gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t.tex); gl.uniform1i(loc, unit); unit++; }
 
 // ---------------- ressources ----------------
-let W, H, aspect, vel, curlT, divT, pres, dye, flowUV, mat, prepT, shadowT, scene, matW, matH;
-//            fluide (lignes)  encre (× écran)  itérations pression  pas de motif  échelle de rendu  échantillons post
+const NBIG = 8, NPART = 72;
+let W, H, aspect, vel, curlT, divT, pres, liq, aux, flowUV, mat, prepT, shadowT, smoothT, redT, red2T, part, scene, halfA, halfB, matW, matH;
+//            fluide (lignes)  liquides (× écran)  itérations pression  pas de motif  échelle de rendu  échantillons post
 const QUALITY = [
-  { fluid: 112, dye: 0.40, iters: 14, rd: 4,  scale: 0.70, taps: 8  },
-  { fluid: 160, dye: 0.55, iters: 20, rd: 8,  scale: 0.90, taps: 12 },
-  { fluid: 224, dye: 0.75, iters: 28, rd: 12, scale: 1.00, taps: 16 },
+  { fluid: 112, dye: 0.40, iters: 16, rd: 4,  scale: 0.70, taps: 8  },
+  { fluid: 160, dye: 0.50, iters: 22, rd: 6,  scale: 0.90, taps: 12 },
+  { fluid: 224, dye: 0.65, iters: 30, rd: 8,  scale: 1.00, taps: 16 },
 ];
 const quality = () => QUALITY[cfg.quality >= 0 ? cfg.quality : (INTEGRATED ? 0 : 1)];
 let renderScale = quality().scale;
-
 
 function buildScene(){
   W = Math.max(2, Math.round(innerWidth * renderScale)); H = Math.max(2, Math.round(innerHeight * renderScale));
   canvas.width = W; canvas.height = H;
   free(scene); scene = target(W, H, gl.RGBA16F, gl.RGBA);
+  const hw = Math.max(2, W >> 1), hh = Math.max(2, H >> 1);
+  free(halfA); halfA = target(hw, hh, gl.RGBA16F, gl.RGBA);
+  free(halfB); halfB = target(hw, hh, gl.RGBA16F, gl.RGBA);
 }
 
 function build(){
@@ -900,31 +1039,45 @@ function build(){
   free(divT); divT = target(fw, fh, gl.R16F, gl.RED);
   freePair(pres); pres = pair(fw, fh, gl.R16F, gl.RED);
   const dw = Math.round(innerWidth * q.dye), dh = Math.round(innerHeight * q.dye);
-  const ph = currentPhase();
-  const dd = new Float32Array(dw*dh*4);
-  for (let i=0;i<dw*dh;i++){ dd[i*4]=ph.base[0]; dd[i*4+1]=ph.base[1]; dd[i*4+2]=ph.base[2]; dd[i*4+3]=0; }
-  freePair(dye); dye = pair(dw, dh, gl.RGBA16F, gl.RGBA, dd);
-  // coordonnées entraînées par le liquide (2 phases), à mi-résolution de l'encre
+  freePair(liq); liq = pair(dw, dh, gl.RGBA16F, gl.RGBA, new Float32Array(dw*dh*4));
+  freePair(aux); aux = pair(dw, dh, gl.RGBA16F, gl.RGBA, new Float32Array(dw*dh*4));
+  // coordonnées entraînées par le liquide (2 phases), à mi-résolution des liquides
   const fw2 = Math.max(16, Math.round(dw*0.75)), fh2 = Math.max(16, Math.round(dh*0.75)), fd = new Float32Array(fw2*fh2*4);
   for (let i=0;i<fw2*fh2;i++){ const x=(i%fw2 + 0.5)/fw2, y=(((i/fw2)|0) + 0.5)/fh2; fd[i*4]=x; fd[i*4+1]=y; fd[i*4+2]=x; fd[i*4+3]=y; }
   freePair(flowUV); flowUV = pair(fw2, fh2, gl.RGBA16F, gl.RGBA, fd);
-  matH = Math.max(160, Math.round(660 / cfg.patternScale)); matW = Math.round(matH * aspect);
+  // la goutte (repère qui suit le curseur) : ~16 vers sur son diamètre, comme dans la vidéo
+  // repère carré de 1,5 hauteur d'écran : la goutte peut s'étirer sans toucher ses bords
+  const perH = Math.max(100, Math.round(600 / cfg.patternScale));
+  matH = matW = Math.round(perH * MATSPAN);
+  frameS = [MATSPAN / aspect, MATSPAN];
   const md = new Float32Array(matW*matH*4), R = heroRadius();
   for (let i=0;i<matW*matH;i++){
     const x=i%matW, y=(i/matW)|0;
-    const dx=(x/matW-0.5)*aspect, dy=y/matH-0.5, inside = Math.hypot(dx,dy) < R;
+    const dx=(x/matW-0.5)*MATSPAN, dy=(y/matH-0.5)*MATSPAN, inside = Math.hypot(dx,dy) < R;
     const blk=((x>>2)*73856093 ^ (y>>2)*19349663)>>>0; const on = inside && (blk%23)<2;
     md[i*4]=on?0.5:1; md[i*4+1]=on?0.3:0; md[i*4+2]=inside?1:0; md[i*4+3]=0.5;
   }
   // réaction-diffusion en 32 bits si possible (en 16 bits les vers se soudent en labyrinthe)
   freePair(mat); mat = pair(matW, matH, floatLinear ? gl.RGBA32F : gl.RGBA16F, gl.RGBA, md);
   free(prepT); prepT = target(matW, matH, gl.RGBA16F, gl.RGBA);
-  free(shadowT); shadowT = target(Math.max(16, matW>>2), Math.max(16, matH>>2), gl.R16F, gl.RED);
+  free(smoothT); smoothT = target(Math.max(12, Math.round(matW/6)), Math.max(12, Math.round(matH/6)), gl.R16F, gl.RED);
+  free(shadowT); shadowT = target(Math.max(16, Math.round(matW/3)), Math.max(16, Math.round(matH/3)), gl.R16F, gl.RED);
+  // réduction 64×64 + mipmaps : surface et centre de la goutte lus directement par le GPU
+  free(redT); free(red2T);
+  redT = target(64, 64, gl.RGBA16F, gl.RGBA, null); red2T = target(64, 64, gl.RGBA16F, gl.RGBA, null);
+  for (const t of [redT, red2T]) {
+    gl.bindTexture(gl.TEXTURE_2D, t.tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_NEAREST);
+    gl.generateMipmap(gl.TEXTURE_2D);
+  }
+  freePair(part); part = pair(NPART, 1, gl.RGBA32F, gl.RGBA, new Float32Array(NPART*4), gl.NEAREST);
+  areaT = Math.PI * R * R / (MATSPAN * MATSPAN);
   warm = 150;
 }
 
 // ---------------- états / phases ----------------
-let time = 0, reshuffled = -1, idEpoch = 0, idSweep = -1;
+let time = 0, reshuffled = -1, idEpoch = 0, idSweep = -1, areaT = 0.3;
+const MATSPAN = 1.5; let frameS = [1, 1];
 function phaseInfo(){
   if (cfg.phaseMode >= 0) return { i: cfg.phaseMode|0, j: cfg.phaseMode|0, t: 0, f: 0 };
   const x = time / cfg.phaseDuration;
@@ -937,14 +1090,14 @@ function currentPhase(){
   const pi = phaseInfo();
   const A = PHASES[pi.i], B = PHASES[pi.j], o = {};
   for (const k in A) o[k] = Array.isArray(A[k]) ? A[k].map((v, n) => v + (B[k][n] - v)*pi.t) : A[k] + (B[k]-A[k])*pi.t;
-  // l'encre du nouvel état arrive avant la transition et envahit l'écran
-  const inkPh = pi.f > 0.55 && pi.i !== pi.j ? B : A;
-  o.inkA = inkPh.inkA; o.inkB = inkPh.inkB; o.floodCol = inkPh.floodCol;
+  // le liquide du nouvel état arrive avant la transition et envahit l'écran
+  o.flood = pi.f > 0.55 && pi.i !== pi.j ? 1 : 0;
+  o.floodCol = o.flood ? B.base : A.base;
+  o.inkA = o.flood ? B.liqA : A.liqA; o.inkB = o.flood ? B.liqB : A.liqB;
   // brassage plus fort pendant les transitions (comme dans la vidéo)
   o.stir = 1.0 + 1.6 * Math.sin(Math.PI * Math.min(1, Math.max(0, (pi.f - 0.55) / 0.45)));
-  o.flood = pi.f > 0.55 && pi.i !== pi.j ? 1 : 0;
   const key = Math.floor(time / cfg.phaseDuration);
-  // nouvelles couleurs une fois par état, quand le motif du nouvel état est formé (cellules séparées)
+  // nouvelles couleurs une fois par état, quand le motif du nouvel état est formé
   o.reshuffle = cfg.phaseMode < 0 && pi.f > 0.12 && reshuffled !== key;
   if (o.reshuffle) reshuffled = key;
   return o;
@@ -971,7 +1124,7 @@ function updateMovers(){
 }
 function updateCamera(){
   const t = time * cfg.speed, a = cfg.camera;
-  cam = [1.10 + 0.05*Math.sin(t*0.07)*a, 0.02*Math.sin(t*0.05)*a, 0.04*Math.sin(t*0.043)*a, 0.025*Math.cos(t*0.051)*a];
+  cam = [1.10 + 0.04*Math.sin(t*0.07)*a, 0.02*Math.sin(t*0.05)*a, 0.03*Math.sin(t*0.043)*a, 0.02*Math.cos(t*0.051)*a];
 }
 // écran -> monde (même transformation que les shaders)
 function screenToWorld(x, y){
@@ -981,39 +1134,39 @@ function screenToWorld(x, y){
   return [ (rx/cam[0] + cam[2]) / aspect + 0.5, ry/cam[0] + cam[3] + 0.5 ];
 }
 
-// ---------------- la grosse goutte à motifs : elle suit la souris ----------------
+// ---------------- la grosse goutte : son repère suit la souris ----------------
+// Le repère se déplace comme une masse tenue par un ressort amorti ; la goutte (un liquide visqueux) y est entraînée
+// par la simulation : elle traîne un peu, se déforme, et le liquide autour la contourne.
 const hero = { x: 0.52, y: 0.5, vx: 0, vy: 0, dirx: 0, diry: 1, k: 0 };
-let heroIdleK = 0.6;   // étirement au repos (dépend de l'état)
-const heroRadius = () => 0.22 + 0.20*cfg.blobAmount;   // en hauteur d'écran (0.32 par défaut)
+const heroRadius = () => 0.24 + 0.28*cfg.blobAmount;   // en hauteur d'écran (0.38 par défaut)
 function updateHero(dt){
   const t = time * cfg.speed;
   const active = cfg.mouse > 0 && performance.now() - mouse.last < 2500;
   let tx, ty;
   if (active) { tx = mouse.x; ty = mouse.y; }
   else { // dérive lente, comme la caméra macro de la vidéo
-    tx = 0.52 + 0.10*Math.sin(t*0.11) + 0.04*Math.sin(t*0.29 + 1.3);
-    ty = 0.50 + 0.07*Math.sin(t*0.15 + 0.7) + 0.03*Math.cos(t*0.31);
+    tx = 0.52 + 0.12*Math.sin(t*0.11) + 0.05*Math.sin(t*0.29 + 1.3);
+    ty = 0.50 + 0.08*Math.sin(t*0.15 + 0.7) + 0.04*Math.cos(t*0.31);
   }
-  const K = active ? 9.0*Math.min(2, Math.max(0.3, cfg.mouse)) : 0.8, C = 2*Math.sqrt(K)*0.85;
+  const K = active ? 7.0*Math.min(2, Math.max(0.3, cfg.mouse)) : 0.8, C = 2*Math.sqrt(K)*0.80;
   let px = hero.x*aspect, py = hero.y, vx = hero.vx*aspect, vy = hero.vy;   // unités isotropes
   vx += ((tx*aspect - px)*K - vx*C)*dt; vy += ((ty - py)*K - vy*C)*dt;
-  const sp = Math.hypot(vx, vy), vmax = 2.5;
+  const sp = Math.hypot(vx, vy), vmax = 2.0;
   if (sp > vmax) { vx *= vmax/sp; vy *= vmax/sp; }
   px += vx*dt; py += vy*dt;
   hero.x = px/aspect; hero.y = py; hero.vx = vx/aspect; hero.vy = vy;
   const s2 = Math.hypot(vx, vy);
-  let ddx = 0.25*Math.sin(t*0.07), ddy = 1;                 // au repos : le liquide file vers le bas
+  let ddx = 0.25*Math.sin(t*0.07), ddy = 1;                 // au repos : le liquide file vers le bas sous la goutte
   if (active && s2 > 0.05) { ddx = vx/s2; ddy = vy/s2; }     // sinon : la traînée suit le mouvement
-  const dl = Math.hypot(ddx, ddy) || 1, f = Math.min(1, dt*(active ? 6 : 1.5));
+  const dl = Math.hypot(ddx, ddy) || 1, f = Math.min(1, dt*(active ? 5 : 1.2));
   hero.dirx += (ddx/dl - hero.dirx)*f; hero.diry += (ddy/dl - hero.diry)*f;
   const l = Math.hypot(hero.dirx, hero.diry) || 1; hero.dirx /= l; hero.diry /= l;
-  // étirement : fort quand la goutte file, léger au repos (traînée de la vidéo)
-  const kt = Math.max(Math.min(1, s2/0.9), active ? 0 : heroIdleK);
-  hero.k += (kt - hero.k)*Math.min(1, dt*(kt > hero.k ? 5 : 1.2));
+  hero.k += (Math.min(1, s2/0.9) - hero.k)*Math.min(1, dt*3);
+  return active;
 }
 
 // ---------------- souris ----------------
-const mouse = { sx: 0.5, sy: 0.5, x: 0.5, y: 0.5, px: 0.5, py: 0.5, last: -1e9, click: 0 };
+const mouse = { sx: 0.5, sy: 0.5, x: 0.5, y: 0.5, last: -1e9 };
 function onMove(cx, cy){ mouse.sx = cx/innerWidth; mouse.sy = 1 - cy/innerHeight; mouse.last = performance.now(); }
 addEventListener('mousemove', e => onMove(e.clientX, e.clientY));
 addEventListener('pointermove', e => onMove(e.clientX, e.clientY));
@@ -1021,7 +1174,8 @@ addEventListener('touchmove', e => { const t=e.touches[0]; if (t) onMove(t.clien
 addEventListener('mousedown', e => onMove(e.clientX, e.clientY));
 
 // ---------------- simulation ----------------
-let warm = 0, last = performance.now(), lastDraw = 0, seed = 1, spotty = 0;
+let heroSpeed = 0;
+let warm = 0, last = performance.now(), lastDraw = 0, seed = 1, spotty = 0, salt = 1;
 const FLOW_T = 5.0; let flowClock = 0; const flowKey = [0, 0];
 const focus = { x: 0.5, y: 0.5 };
 
@@ -1031,10 +1185,10 @@ function step(dt){
   const sp = cfg.speed;
   updateCamera();
   [mouse.x, mouse.y] = screenToWorld(mouse.sx, mouse.sy);
-  heroIdleK = ph.tailIdle;
-  updateHero(dt);
+  const active = updateHero(dt);
   updateMovers();
   const R = heroRadius();
+  const texPerH = vel.h;
 
   const em = new Float32Array(16), emP = new Float32Array(16), emI = new Float32Array(16), ink = [];
   EM.forEach((e, i) => {
@@ -1045,7 +1199,7 @@ function step(dt){
       r = 0.02; force = 2.5*ph.bead*sp;
     }
     let wrap = 0;
-    if (i === 1 && ph.bead > 0.05) {   // filets d'encre chocolat qui s'enroulent autour de la grosse goutte
+    if (i === 1 && ph.bead > 0.05) {   // filets d'encre bordeaux qui s'enroulent autour de la grosse goutte
       const tw = -time*0.30*sp + 1.3, rr = R*1.32;
       ex = hero.x + rr*Math.cos(tw)/aspect; ey = hero.y + rr*Math.sin(tw);
       vx = rr*0.30*sp*Math.sin(tw)/aspect; vy = -rr*0.30*sp*Math.cos(tw);
@@ -1054,42 +1208,59 @@ function step(dt){
     em.set([ex, ey, vx*vel.w*1.6, vy*vel.h*1.6], i*4);
     emP.set([r, force, 0, 0], i*4);
     const pulse = Math.max(0, Math.sin(time*0.35*sp + e.seed*5.0));
-    // pendant une transition, deux émetteurs déversent largement l'encre du nouvel état
+    // pendant une transition, deux émetteurs déversent largement le liquide du nouvel état
     const flooding = ph.flood > 0 && i % 2 === 0;
     const amount = (pulse*pulse*2.5*ph.inkRate*(1 - wrap) + wrap*3.0 + ph.flood*(flooding ? 2.2 : 3.0)) * sp;
-    emI.set([flooding ? 0.035 : 0.006 + 0.008*(i%2), amount, i%2 ? 1 : 0.3, flooding ? 0.3*ph.comb : ph.comb], i*4);
-    ink.push(...(flooding ? ph.floodCol : (i%2 ? ph.inkB : ph.inkA)));
+    emI.set([flooding ? 0.035 : 0.006 + 0.008*(i%2), amount, flooding ? 2 : (i%2 ? 1 : 0), flooding ? 0.3*ph.comb : ph.comb], i*4);
   });
 
   // la goutte entraîne le liquide avec elle (sillage) et laisse une traînée d'encre derrière
   const hs = Math.hypot(hero.vx*aspect, hero.vy);
   const trailX = hero.x - hero.dirx*R*0.85/aspect, trailY = hero.y - hero.diry*R*0.85;
+  const curA = ph.current * (active ? 0.5 : 1.0) * 0.12;
+  // vitesse lissée de la goutte : quand elle file, la tension de surface la retient moins (traînée)
+  heroSpeed += (hs - heroSpeed) * Math.min(1, dt*3);
+  const relaxF = 1 / (1 + 3*heroSpeed);
 
   pass(P.forces, vel.b, u => {
-    tex(u.uVel, vel.a);
+    tex(u.uVel, vel.a); tex(u.uBlob, shadowT);
     gl.uniform1f(u.uDt, dt); gl.uniform1f(u.uAspect, aspect); gl.uniform1f(u.uTime, time*sp); gl.uniform1f(u.uEnergy, ph.energy*ph.stir*sp);
+    gl.uniform1f(u.uKv, ph.kv); gl.uniform1f(u.uR, R); gl.uniform1f(u.uRagged, ph.ragged); gl.uniform1f(u.uTexPerH, texPerH);
+    tex(u.uRed, redT); tex(u.uRed2, red2T); gl.uniform1f(u.uRelaxK, (0.35 + 6.0*ph.gamma) * relaxF); gl.uniform1f(u.uRear, active ? 0.80 : 0.4);
     gl.uniform4fv(u.uEm, em); gl.uniform4fv(u.uEmP, emP);
-    gl.uniform4f(u.uHeroF, hero.x, hero.y, hero.vx*vel.w, hero.vy*vel.h);
-    gl.uniform2f(u.uHeroFP, (R*0.8)*(R*0.8), 6.0);
+    gl.uniform2f(u.uFrameC, hero.x, hero.y); gl.uniform2fv(u.uFrameS, frameS); gl.uniform2f(u.uFrameV, hero.vx*vel.w, hero.vy*vel.h);
+    gl.uniform4f(u.uCurrent, -hero.dirx, -hero.diry, curA*sp, 0);
+    gl.uniform2f(u.uBTexel, 1.5/shadowT.w, 1.5/shadowT.h);
   }); vel.swap();
 
   pass(P.curl, curlT, u => { tex(u.uVel, vel.a); gl.uniform2fv(u.uTexel, vel.texel); });
-  pass(P.vort, vel.b, u => { tex(u.uVel, vel.a); tex(u.uCurl, curlT); gl.uniform2fv(u.uTexel, vel.texel); gl.uniform1f(u.uCurlAmt, ph.curl); gl.uniform1f(u.uDt, dt); }); vel.swap();
+  pass(P.vort, vel.b, u => { tex(u.uVel, vel.a); tex(u.uCurl, curlT); tex(u.uBlob, shadowT); gl.uniform2fv(u.uTexel, vel.texel); gl.uniform1f(u.uCurlAmt, ph.curl); gl.uniform1f(u.uDt, dt); gl.uniform2f(u.uFrameC, hero.x, hero.y); gl.uniform2fv(u.uFrameS, frameS); }); vel.swap();
   pass(P.div, divT, u => { tex(u.uVel, vel.a); gl.uniform2fv(u.uTexel, vel.texel); });
   pass(P.scale, pres.b, u => { tex(u.uSrc, pres.a); gl.uniform1f(u.uValue, 0.8); }); pres.swap();
   for (let i=0;i<q.iters;i++){ pass(P.pressure, pres.b, u => { tex(u.uP, pres.a); tex(u.uDiv, divT); gl.uniform2fv(u.uTexel, vel.texel); }); pres.swap(); }
   pass(P.grad, vel.b, u => { tex(u.uP, pres.a); tex(u.uVel, vel.a); gl.uniform2fv(u.uTexel, vel.texel); }); vel.swap();
   pass(P.advect, vel.b, u => { tex(u.uVel, vel.a); tex(u.uSrc, vel.a); gl.uniform2fv(u.uVelTexel, vel.texel); gl.uniform1f(u.uDt, dt); gl.uniform1f(u.uDiss, 0.35); }); vel.swap();
 
-  pass(P.dye, dye.b, u => {
-    tex(u.uVel, vel.a); tex(u.uDye, dye.a);
+  // liquides du décor
+  pass(P.liq, liq.b, u => {
+    tex(u.uVel, vel.a); tex(u.uSrc, liq.a);
     gl.uniform2fv(u.uVelTexel, vel.texel); gl.uniform1f(u.uDt, dt); gl.uniform1f(u.uAspect, aspect); gl.uniform1f(u.uTime, time);
-    gl.uniform3fv(u.uBase, ph.base); gl.uniform3fv(u.uInk, ink); gl.uniform4fv(u.uEm, em); gl.uniform4fv(u.uEmI, emI);
-    gl.uniform2f(u.uMouse, trailX, trailY);
-    gl.uniform1f(u.uMouseInk, cfg.mouseInk ? Math.min(1, hs*1.5) * 2.5 * ph.trail : 0);
-    gl.uniform1f(u.uMouseR, (R*0.45)*(R*0.45)); gl.uniform3fv(u.uMouseCol, ph.trailCol); gl.uniform1f(u.uSpeck, ph.speck);
-    gl.uniform1f(u.uRelaxBase, ph.flood ? 0.22 : 0.10);
-  }); dye.swap();
+    gl.uniform4fv(u.uEm, em); gl.uniform4fv(u.uEmI, emI);
+    gl.uniform4f(u.uRelax, 0.07, 0.07, ph.flood ? 0.0 : 0.6, 0.10);
+    gl.uniform2f(u.uTrailP, trailX, trailY);
+    gl.uniform1f(u.uTrailAmt, cfg.mouseInk ? Math.min(1, hs*1.5) * 2.5 * ph.trail : 0);
+    gl.uniform1f(u.uTrailR, (R*0.40)*(R*0.40));
+  }); liq.swap();
+  // fils blancs (par impulsions, un émetteur qui se promène) et particules sombres (avec l'encre rouge)
+  const sOn = Math.max(0, Math.sin(time*0.45*sp + 0.7)) > 0.55 ? 1 : 0;
+  const se = EM[2], k1 = EM[1], k3 = EM[3];
+  pass(P.aux, aux.b, u => {
+    tex(u.uVel, vel.a); tex(u.uSrc, aux.a);
+    gl.uniform2fv(u.uVelTexel, vel.texel); gl.uniform1f(u.uDt, dt); gl.uniform1f(u.uAspect, aspect);
+    gl.uniform4f(u.uSEm, 1 - se.x, 1 - se.y, 0.011*0.011, sOn * ph.lines * (1 - ph.flood));
+    gl.uniform4fv(u.uKEm, [k1.x, k1.y, 0.03*0.03, ph.speck, k3.x, k3.y, 0.03*0.03, ph.speck]);
+    gl.uniform2f(u.uAuxRelax, 0.10, 0.06);
+  }); aux.swap();
 
   // coordonnées entraînées : chaque phase est remise à zéro à tour de rôle (période FLOW_T)
   const fa = flowClock / FLOW_T, ka = Math.floor(fa), kb = Math.floor(fa + 0.5);
@@ -1102,12 +1273,15 @@ function step(dt){
   }); flowUV.swap();
   flowClock += dt * sp;
 
+  // la goutte : transportée par le courant relatif, tension de surface, surface conservée
   pass(P.mat, mat.b, u => {
-    tex(u.uVel, vel.a); tex(u.uMat, mat.a);
-    gl.uniform2fv(u.uVelTexel, vel.texel); gl.uniform1f(u.uDt, dt); gl.uniform1f(u.uAspect, aspect); gl.uniform1f(u.uTime, time*sp);
-    gl.uniform1f(u.uRelax, warm > 0 ? 50 : 0.6); gl.uniform2fv(u.uTexelM, mat.texel);
-    gl.uniform1f(u.uR, R); gl.uniform1f(u.uFlow, (ph.flow ?? 0.25)*ph.stir);
-    gl.uniform2f(u.uHeroW, hero.x, hero.y); gl.uniform1f(u.uRagged, ph.ragged);
+    tex(u.uVel, vel.a); tex(u.uMat, mat.a); tex(u.uRed, redT); tex(u.uSmooth, smoothT); gl.uniform1f(u.uTension, 200*ph.gamma); gl.uniform1f(u.uSpan, MATSPAN);
+    tex(u.uRed2, red2T); gl.uniform1f(u.uShapeK, Math.min(0.8, Math.max(0.15, 6*ph.gamma)) * relaxF);
+    gl.uniform2fv(u.uVelTexel, vel.texel); gl.uniform2fv(u.uTexelM, mat.texel);
+    gl.uniform2f(u.uFrameC, hero.x, hero.y); gl.uniform2fv(u.uFrameS, frameS); gl.uniform2f(u.uFrameV, hero.vx, hero.vy);
+    gl.uniform1f(u.uDt, dt); gl.uniform1f(u.uAspect, aspect);
+    gl.uniform1f(u.uGamma, ph.gamma); gl.uniform1f(u.uAreaT, areaT); gl.uniform1f(u.uKc, 1.5);
+    gl.uniform1f(u.uInit, warm > 0 ? 1 : 0); gl.uniform1f(u.uR, R); gl.uniform1f(u.uFlow, ph.flow);
   }); mat.swap();
 
   const n = warm > 0 ? 24 : q.rd; if (warm > 0) warm--;
@@ -1123,57 +1297,89 @@ function step(dt){
     pass(P.rd, mat.b, u => {
       tex(u.uMat, mat.a); tex(u.uEdge, shadowT); gl.uniform2fv(u.uTexel, mat.texel); gl.uniform1f(u.uSeed, (seed = (seed+1) % 1e6));
       gl.uniform1f(u.uF, f); gl.uniform1f(u.uK, k); gl.uniform1f(u.uIso, ph.iso); gl.uniform1f(u.uKVar, ph.kvar); gl.uniform1f(u.uEdgeK, ph.edgeK);
-      // pendant la formation du motif, pas d'identité : les vers naissent soudés puis se séparent
       gl.uniform1f(u.uIdReset, warm > 0 ? 1 : 0);
       gl.uniform1f(u.uEpoch, idEpoch); gl.uniform1f(u.uSweep, idSweep);
       gl.uniform1f(u.uIdLevels, floatLinear ? 1048576 : 1900);
     });
     mat.swap();
   }
-  // masque flouté : ombre portée, dôme, et bande sans vers le long du bord
+  // masque flouté : ombre portée, dôme, couplage avec le liquide ; puis surface et centre (mipmaps)
   pass(P.shadow, shadowT, u => { tex(u.uMat, mat.a); gl.uniform2fv(u.uTexel, shadowT.texel); });
+  pass(P.blurm, smoothT, u => { tex(u.uSrc, shadowT); gl.uniform2f(u.uTexel, 2.5/shadowT.w, 2.5/shadowT.h); });
+  for (const [t, mode] of [[redT, 0], [red2T, 1]]) {
+    pass(P.reduce, t, u => { tex(u.uBlob, shadowT); gl.uniform1f(u.uSpan, MATSPAN); gl.uniform1f(u.uMode, mode); });
+    gl.bindTexture(gl.TEXTURE_2D, t.tex); gl.generateMipmap(gl.TEXTURE_2D);
+  }
+
+  // gouttes d'huile et bulles emportées par le courant
+  pass(P.part, part.b, u => {
+    tex(u.uP, part.a); tex(u.uVel, vel.a); tex(u.uBlob, shadowT);
+    gl.uniform2fv(u.uVelTexel, vel.texel); gl.uniform1f(u.uDt, dt); gl.uniform1f(u.uTime, time); gl.uniform1f(u.uAspect, aspect);
+    gl.uniform1f(u.uSalt, (salt = (salt * 1.618) % 97) + 0.37); gl.uniform1f(u.uNBig, NBIG); gl.uniform2f(u.uFrameC, hero.x, hero.y); gl.uniform2fv(u.uFrameS, frameS);
+  }); part.swap();
   return ph;
 }
 
 function render(ph){
   const q = quality();
+  const R = heroRadius();
   pass(P.prep, prepT, u => { tex(u.uMat, mat.a); gl.uniform2fv(u.uTexel, mat.texel); });
   pass(P.scene, scene, u => {
-    tex(u.uDye, dye.a); tex(u.uMat, mat.a); tex(u.uPrep, prepT); tex(u.uVel, vel.a); tex(u.uShadow, shadowT);
-    gl.uniform2fv(u.uDyeTexel, dye.texel); gl.uniform2fv(u.uMatTexel, mat.texel); gl.uniform2fv(u.uVelTexel, vel.texel); gl.uniform2fv(u.uShadowTexel, shadowT.texel);
-    gl.uniform1f(u.uAspect, aspect); gl.uniform1f(u.uTime, time*cfg.speed); gl.uniform1f(u.uDrops, ph.drops * cfg.droplets);
-    gl.uniform1f(u.uGloss, ph.gloss); gl.uniform1f(u.uNeonAmt, ph.neonAmt); gl.uniform1f(u.uIso, ph.iso);
-    gl.uniform1f(u.uDomeW, 4.0);
-    tex(u.uFlowUV, flowUV.a);
+    tex(u.uLiq, liq.a); tex(u.uAux, aux.a); tex(u.uPrep, prepT); tex(u.uMat, mat.a); tex(u.uShadow, shadowT); tex(u.uFlowUV, flowUV.a); tex(u.uP, part.a);
+    gl.uniform2fv(u.uLiqTexel, liq.texel); gl.uniform2fv(u.uAuxTexel, aux.texel); gl.uniform2fv(u.uMatTexel, mat.texel); gl.uniform2fv(u.uShadowTexel, shadowT.texel);
+    gl.uniform1f(u.uAspect, aspect); gl.uniform1f(u.uTime, time*cfg.speed); gl.uniform1f(u.uClock, time); gl.uniform1f(u.uPx, H / 720);
+    gl.uniform3fv(u.uBase, ph.base); gl.uniform3fv(u.uLiqCol, [...ph.inkA, ...ph.inkB, ...ph.floodCol, ...ph.trailCol]);
+    gl.uniform1f(u.uLiqH0, ph.liqH[0]); gl.uniform4f(u.uLiqH, ph.liqH[1], ph.liqH[2], ph.liqH[3], ph.liqH[4]);
+    gl.uniform3fv(u.uLineCol, ph.lineCol); gl.uniform1f(u.uSpeck, ph.speck); gl.uniform1f(u.uMottle, ph.mottle); gl.uniform3fv(u.uSpeckCol, ph.speckCol);
     const fa = flowClock / FLOW_T, wa = 1 - Math.abs(2*(fa - Math.floor(fa)) - 1);
     gl.uniform4f(u.uFlowW, wa, 1 - wa, 0, 0);
     const ka = Math.floor(fa), kb = Math.floor(fa + 0.5);
     gl.uniform4f(u.uFlowOff, (ka*0.6180339) % 1 * 7.0, (ka*0.4142135) % 1 * 7.0, (kb*0.7320508) % 1 * 7.0 + 3.1, (kb*0.2360679) % 1 * 7.0 + 1.7);
-    gl.uniform1f(u.uGlow, ph.glow); gl.uniform1f(u.uBgGloss, ph.bgGloss); gl.uniform1f(u.uSpeck, ph.speck); gl.uniform1f(u.uShell, ph.shell);
-    gl.uniform1f(u.uPx, H / 720); gl.uniform1f(u.uShadowMix, ph.shadowMix); gl.uniform1f(u.uShadowOff, ph.shadowOff); gl.uniform4fv(u.uDropStyle, ph.dropStyle); gl.uniform1f(u.uIsoBand, ph.isoBand); gl.uniform1f(u.uRimDir, ph.rimDir);
-    gl.uniform3fv(u.uLip, ph.lip); gl.uniform3fv(u.uGlowCol, ph.glowCol); gl.uniform3fv(u.uSpeckCol, ph.speckCol);
-    gl.uniform3fv(u.uDropMul, ph.dropMul); gl.uniform3fv(u.uDropAdd, ph.dropAdd); gl.uniform3fv(u.uBase, ph.base);
+    gl.uniform1f(u.uDrops, ph.drops * cfg.droplets); gl.uniform4fv(u.uDropStyle, ph.dropStyle); gl.uniform3fv(u.uDropMul, ph.dropMul); gl.uniform3fv(u.uDropAdd, ph.dropAdd);
+    gl.uniform1f(u.uRimDir, ph.rimDir); gl.uniform1i(u.uNBig, NBIG);
+    gl.uniform2f(u.uFrameC, hero.x, hero.y); gl.uniform2fv(u.uFrameS, frameS);
     gl.uniform3fv(u.uCell, [...ph.cellA, ...ph.cellB, ...ph.cellC]);
-    gl.uniform3fv(u.uLine, ph.line); gl.uniform3fv(u.uGap, ph.gap); gl.uniform3fv(u.uGap2, ph.gap2); gl.uniform3fv(u.uNeon, ph.neon);
-    gl.uniform3fv(u.uShadowCol, ph.shadow); gl.uniform3fv(u.uWall, ph.wall);
-    gl.uniform3fv(u.uTrailA, ph.trailCol); gl.uniform3fv(u.uTrailB, ph.inkB); gl.uniform1f(u.uTrail, ph.trail);
-    gl.uniform4f(u.uHero, hero.x, hero.y, heroRadius(), hero.k);
-    gl.uniform2f(u.uHeroDir, hero.dirx, hero.diry);
+    gl.uniform3fv(u.uOutline, ph.outline); gl.uniform3fv(u.uGapA, ph.gapA); gl.uniform3fv(u.uGapB, ph.gapB); gl.uniform3fv(u.uGapC, ph.gapC);
+    gl.uniform3fv(u.uWall, ph.wall); gl.uniform3fv(u.uLip, ph.lip);
+    gl.uniform1f(u.uIso, ph.iso); gl.uniform1f(u.uGloss, ph.gloss); gl.uniform1f(u.uFres, ph.fres); gl.uniform1f(u.uDomeW, 3.0);
+    gl.uniform1f(u.uIsoBand, ph.isoBand); gl.uniform1f(u.uShell, ph.shell);
+    gl.uniform3fv(u.uShadowCol, ph.shadow); gl.uniform1f(u.uShadowMix, ph.shadowMix); gl.uniform1f(u.uShadowAmt, ph.shadowAmt);
+    gl.uniform2f(u.uShadowOff, 0.045*ph.shadowOff/aspect, 0.075*ph.shadowOff);
     const bl = Math.hypot(bead.dx, bead.dy) || 1;
-    gl.uniform4f(u.uBead, bead.x, bead.y, heroRadius()*0.48, ph.bead);
+    gl.uniform4f(u.uBead, bead.x, bead.y, R*0.48, ph.bead);
     gl.uniform2f(u.uBeadDir, bead.dx/bl, bead.dy/bl);
     gl.uniform3fv(u.uBeadCol, BEAD_COL); gl.uniform3fv(u.uBeadShadow, BEAD_SHADOW);
   });
-  // mise au point sur la goutte (position à l'écran)
-  const hx = (hero.x - 0.5)*aspect - cam[2], hy = (hero.y - 0.5) - cam[3];
+  // petites bulles par-dessus (sprites)
+  if (ph.bubbles > 0.01) {
+    gl.useProgram(P.sprite.p);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, scene.fbo); gl.viewport(0, 0, W, H);
+    gl.bindVertexArray(pointVao);
+    unit = 0; tex(P.sprite.u.uP, part.a);
+    gl.uniform4fv(P.sprite.u.uCam, cam); gl.uniform1f(P.sprite.u.uAspect, aspect); gl.uniform1f(P.sprite.u.uH, H);
+    gl.uniform1f(P.sprite.u.uClock, time); gl.uniform1i(P.sprite.u.uFirst, NBIG);
+    gl.uniform1f(P.sprite.u.uAmt, ph.bubbles); gl.uniform3fv(P.sprite.u.uRingCol, ph.ringCol);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.drawArrays(gl.POINTS, 0, NPART - NBIG);
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray(quadVao);
+  }
+  // flou (demi-résolution) pour le flou de profondeur et le halo
+  pass(P.down, halfA, u => { tex(u.uSrc, scene); gl.uniform2f(u.uTexel, 0.5/W, 0.5/H); });
+  pass(P.blur, halfB, u => { tex(u.uSrc, halfA); gl.uniform2f(u.uDir, 2.2/halfA.w, 0); });
+  pass(P.blur, halfA, u => { tex(u.uSrc, halfB); gl.uniform2f(u.uDir, 0, 2.2/halfA.h); });
+  // mise au point sur l'avant de la goutte (position à l'écran)
+  const ahead = 0.25*R;
+  const hx = (hero.x - 0.5)*aspect + hero.dirx*ahead - cam[2], hy = (hero.y - 0.5) + hero.diry*ahead - cam[3];
   const c = Math.cos(cam[1]), s = Math.sin(cam[1]);
   const fx = (c*hx + s*hy)*cam[0], fy = (-s*hx + c*hy)*cam[0];
-  focus.x += ((fx/aspect + 0.5) - focus.x)*0.05; focus.y += ((fy + 0.5) - focus.y)*0.05;
+  focus.x += ((fx/aspect + 0.5) - focus.x)*0.08; focus.y += ((fy + 0.5) - focus.y)*0.08;
   pass(P.post, null, u => {
-    tex(u.uScene, scene); tex(u.uVel, vel.a);
+    tex(u.uScene, scene); tex(u.uBlur, halfA); tex(u.uVel, vel.a);
     gl.uniform2f(u.uTexel, 1/W, 1/H); gl.uniform2fv(u.uVelTexel, vel.texel);
     gl.uniform1f(u.uTime, time); gl.uniform1f(u.uAspect, aspect);
-    gl.uniform1f(u.uDof, cfg.dof); gl.uniform1f(u.uBloom, cfg.bloom); gl.uniform2f(u.uFocus, focus.x, focus.y);
+    gl.uniform1f(u.uDof, cfg.dof); gl.uniform1f(u.uBloom, cfg.bloom);
+    gl.uniform2f(u.uFocus, focus.x, focus.y); gl.uniform2f(u.uFocusDir, hero.dirx, hero.diry); gl.uniform1f(u.uFocusR, R*cam[0]);
     gl.uniform1f(u.uShutter, 0.045 * cfg.motionBlur);
     gl.uniform1i(u.uTaps, q.taps);
   });
@@ -1217,7 +1423,7 @@ window.wallpaperPropertyListener = {
     num(p, 'speed', v => cfg.speed = v);
     num(p, 'mouseforce', v => cfg.mouse = v);
     num(p, 'mouseink', v => cfg.mouseInk = !!v);
-    num(p, 'blobamount', v => cfg.blobAmount = v);
+    num(p, 'blobamount', v => { if (v !== cfg.blobAmount) { cfg.blobAmount = v; rebuild = true; } });
     num(p, 'phase', v => cfg.phaseMode = parseInt(v, 10));
     num(p, 'phaseduration', v => cfg.phaseDuration = Math.max(4, v));
     num(p, 'droplets', v => cfg.droplets = v);
@@ -1236,11 +1442,11 @@ window.wallpaperPropertyListener = {
 const qs = new URLSearchParams(location.search);
 const qmap = { speed:'speed', mouse:'mouse', patternScale:'patternScale', blobAmount:'blobAmount', phase:'phaseMode', phaseDuration:'phaseDuration', droplets:'droplets', dof:'dof', bloom:'bloom', motionBlur:'motionBlur', camera:'camera', quality:'quality' };
 let qRebuild = false;
-for (const k in qmap) if (qs.has(k)) { cfg[qmap[k]] = parseFloat(qs.get(k)); if (k==='patternScale'||k==='quality') qRebuild = true; }
+for (const k in qmap) if (qs.has(k)) { cfg[qmap[k]] = parseFloat(qs.get(k)); if (k==='patternScale'||k==='quality'||k==='blobAmount') qRebuild = true; }
 if (qs.has('t')) time = parseFloat(qs.get('t'));
 if (qRebuild) { build(); for (let i=0;i<20;i++){ time += 1/60; step(1/60); } }
 if (qs.has('scale')) { renderScale = parseFloat(qs.get('scale')); buildScene(); }
-window.__fluid = { cfg, mouse, hero, PHASES, GPU, INTEGRATED, gl, get mat(){ return mat; }, get time(){ return time; }, set time(v){ time = v; },
+window.__fluid = { cfg, mouse, hero, PHASES, GPU, INTEGRATED, gl, get mat(){ return mat; }, get redT(){ return redT; }, get time(){ return time; }, set time(v){ time = v; },
   run(n, dt = 1/30, mousePath){
     let ph;
     for (let i=0;i<n;i++){
