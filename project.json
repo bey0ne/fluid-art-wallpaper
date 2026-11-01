@@ -1,8 +1,8 @@
 {
   "file": "index.html",
   "type": "web",
-  "title": "Goutte de pluie",
-  "description": "Une seule petite goutte d'eau court sur une surface mouillée et suit la souris. Elle a de l'inertie, s'étire en filet quand elle file et s'arrondit quand elle s'arrête. Elle avale les gouttelettes sur son passage et laisse derrière elle une traînée de petites perles. Les gouttelettes et la buée reviennent peu à peu. Fond abstrait aux couleurs réglables, ou ton image.",
+  "title": "Goutte microscopique",
+  "description": "Une seule petite goutte de liquide à motifs, dans le décor des films microscopiques de liquides, suit la souris en coulant comme une goutte de pluie : elle s'accroche, file en s'étirant en larme, tremble en s'arrêtant, et laisse derrière elle un filet du même liquide qui se casse en perles. Quatre décors tirés de la vidéo : pêche, bordeaux, rose, ambre.",
   "preview": "preview.jpg",
   "tags": [
     "Abstract"
@@ -30,92 +30,54 @@
         "precision": 2,
         "order": 1
       },
-      "beads": {
-        "text": "Perles laissées derrière la goutte",
-        "type": "bool",
-        "value": true,
-        "order": 2
-      },
-      "density": {
-        "text": "Densité des gouttelettes",
+      "trail": {
+        "text": "Liquide laissé derrière la goutte (0 = aucun)",
         "type": "slider",
         "min": 0,
         "max": 2,
         "value": 1,
         "fraction": true,
         "precision": 2,
+        "order": 2
+      },
+      "dry": {
+        "text": "Secondes avant que les perles sèchent",
+        "type": "slider",
+        "min": 5,
+        "max": 120,
+        "value": 45,
+        "fraction": false,
         "order": 3
       },
-      "regrow": {
-        "text": "Retour des gouttelettes dans la traînée",
-        "type": "slider",
-        "min": 0.1,
-        "max": 4,
-        "value": 1,
-        "fraction": true,
-        "precision": 2,
-        "order": 4
-      },
-      "mist": {
-        "text": "Buée",
-        "type": "slider",
-        "min": 0,
-        "max": 1,
-        "value": 0.5,
-        "fraction": true,
-        "precision": 2,
-        "order": 5
-      },
-      "palette": {
-        "text": "Couleurs du fond",
+      "decor": {
+        "text": "Décor",
         "type": "combo",
         "value": "0",
-        "order": 6,
+        "order": 4,
         "options": [
           {
-            "label": "Nuit bleue",
+            "label": "Pêche",
             "value": "0"
           },
           {
-            "label": "Crépuscule",
+            "label": "Bordeaux",
             "value": "1"
           },
           {
-            "label": "Forêt",
+            "label": "Rose",
             "value": "2"
           },
           {
-            "label": "Néon",
+            "label": "Ambre",
             "value": "3"
-          },
-          {
-            "label": "Brume",
-            "value": "4"
-          },
-          {
-            "label": "Ma couleur",
-            "value": "5"
           }
         ]
-      },
-      "tint": {
-        "text": "Ma couleur (avec « Couleurs du fond : Ma couleur »)",
-        "type": "color",
-        "value": "0.30 0.50 0.95",
-        "order": 7
-      },
-      "image": {
-        "text": "Image de fond (facultatif)",
-        "type": "file",
-        "fileType": "image",
-        "value": "",
-        "order": 8
       },
       "quality": {
         "text": "Qualité",
         "type": "combo",
         "value": "-1",
-        "order": 9,
+        "order": 5,
         "options": [
           {
             "label": "Auto (s'adapte à la carte graphique)",
