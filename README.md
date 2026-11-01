@@ -1,26 +1,22 @@
-# Fluide microscopique
+# Goutte de pluie
 
-Fond d'écran animé pour [Wallpaper Engine](https://www.wallpaperengine.io/), recréé à partir d'un film de « fluid art » microscopique. Une grosse goutte de liquide couverte de vers de peinture (corail, moutarde, olive) cernés de noir, séparés par des sillons bleus brillants, **suit la souris** dans le décor. C'est une vraie simulation de fluide, calculée en temps réel en WebGL2 : aucune vidéo n'est utilisée.
+Fond d'écran animé pour [Wallpaper Engine](https://www.wallpaperengine.io/). Ton écran est couvert de gouttelettes comme une surface mouillée, et **une seule petite goutte suit la souris** en coulant comme une goutte de pluie sur une vitre. Tout est calculé en temps réel en WebGL2 : aucune vidéo n'est utilisée.
 
 ![Aperçu](preview.jpg)
 
-## La goutte suit la souris
+## La goutte
 
-- Quand la souris bouge, la goutte la suit avec de l'inertie. Elle est tirée par l'avant : son arrière, moins retenu, traîne et s'étire, et le motif s'étire avec lui.
-- Quand elle ralentit, la tension de surface la ramène vers une forme ronde.
-- Elle pousse le liquide autour d'elle et entraîne avec elle la couche de liquide qui la touche, ce qui fait tourbillonner les encres du décor.
-- Quand la souris ne bouge plus, la goutte dérive lentement toute seule.
+- Elle rejoint le curseur avec de l'inertie et une vitesse limitée, en serpentant un peu entre les gouttelettes. Une petite traction ne suffit pas à la décoller : elle reste accrochée tant que la souris bouge à peine.
+- Quand elle file, sa queue, retenue par la surface, s'étire en filet derrière une tête ronde. Quand elle ralentit, la tension de surface rétracte la queue et la goutte redevient ronde.
+- Son volume est conservé. Elle s'amincit en s'étirant, grossit en avalant les gouttelettes et les perles qu'elle touche, et perd de l'eau en laissant des perles au bout de sa queue.
+- Elle essuie la buée et les gouttelettes sur son passage. La traînée propre se recouvre peu à peu : les plus petites gouttelettes reviennent d'abord.
 
-## Les 4 états
+## La surface
 
-Le fond d'écran passe de l'un à l'autre en continu, comme dans la vidéo. À chaque transition, l'encre du nouvel état envahit l'écran et le motif de la goutte se transforme.
-
-1. **Goutte corail** : fond jaune paille, vers corail, moutarde et olive cernés de noir, sillons bleu nuit avec des filets clairs.
-2. **Goutte rose et encre chocolat** : une goutte rose mate, cerclée d'un reflet blanc en « U », s'enfonce dans la grosse goutte et écrase le motif autour d'elle. Des filets d'encre chocolat s'enroulent autour, de grosses bulles transparentes flottent, l'ombre devient bleu-violet.
-3. **Liquide rose, lignes lumineuses et encre rouge** : le liquide devient rose, traversé de lignes lumineuses blanc-cyan qui serpentent avec le courant, de particules sombres et de nuages d'encre rouge-orangée. La goutte se déchire et ses vers se cassent en cellules serrées au liseré bleu.
-4. **Huile ambrée** : liquide doré et grosses gouttes d'huile floues à bord orangé. La goutte devient une coque d'huile brun olive brillante, pleine de perles orange et jaunes cernées de brun, avec des traînées vertes.
-
-Quand le cycle revient à la goutte corail, les perles s'allongent et redeviennent des vers.
+- Des milliers de gouttelettes de trois tailles, avec de la buée entre elles qui floute le fond.
+- Chaque goutte agit comme une lentille : elle montre une petite image renversée et nette de ce qui l'entoure, avec un bord sombre, un reflet et la lumière concentrée du côté opposé.
+- Les gouttes proches se rejoignent par des ponts de liquide, comme de vraies gouttes.
+- Le fond est abstrait : des volutes de couleur qui coulent très lentement. Tu peux choisir une palette, ta propre couleur ou ta propre image.
 
 ## Installation
 
@@ -46,26 +42,23 @@ Téléchargez le ZIP (**Code → Download ZIP**). Dans Wallpaper Engine, ouvrez 
 
 | Réglage | Effet |
 | --- | --- |
-| État | Cycle automatique, ou un des 4 états fixe |
-| Durée de chaque état | En secondes (15 par défaut) |
-| Suivi de la souris | Vitesse à laquelle la goutte rejoint le curseur ; 0 = elle dérive seule |
-| Traînée d'encre derrière la goutte | Dépose de l'encre dans le liquide quand elle bouge |
-| Taille de la goutte | Rayon de la grosse goutte |
-| Taille des vers | Plus la valeur est grande, plus les vers sont gros (et plus c'est léger pour la carte graphique) |
-| Vitesse | Vitesse du liquide, de la dérive et des transitions |
-| Gouttes d'huile, Flou de mouvement, Mouvement de caméra, Flou de profondeur, Halo lumineux | Effets de rendu |
-| Qualité | « Auto » détecte les cartes graphiques intégrées (Intel Iris, etc.) et baisse la résolution si les images saccadent |
+| Taille de la goutte | Rayon de la goutte qui suit la souris |
+| Vitesse de la goutte | Vitesse à laquelle elle rejoint le curseur ; 0 = elle ne bouge plus |
+| Perles laissées derrière la goutte | La traînée de petites gouttes au bout de sa queue |
+| Densité des gouttelettes | Quantité de gouttelettes sur la surface ; 0 = surface sèche |
+| Retour des gouttelettes dans la traînée | Plus la valeur est grande, plus la traînée se recouvre vite |
+| Buée | Voile flou entre les gouttelettes |
+| Couleurs du fond, Ma couleur | Palette du fond abstrait, ou ta propre couleur |
+| Image de fond | Ton image à la place du fond abstrait (facultatif) |
+| Qualité | « Auto » baisse la résolution sur les cartes graphiques intégrées (Intel Iris, etc.) ou si les images saccadent |
 
 ## Aperçu dans un navigateur
 
-Ouvrez `index.html` dans Chrome ou Edge. Les réglages se testent par l'URL, par exemple `index.html?phase=1&speed=1.5&quality=0`.
+Ouvrez `index.html` dans Chrome ou Edge. Les réglages se testent par l'URL, par exemple `index.html?palette=1&dropsize=1.5&density=1.3`.
 
 ## Fonctionnement
 
-- **Fluide** : simulation Navier-Stokes sur GPU (advection, confinement de vorticité, projection de pression). Des émetteurs invisibles y déposent les encres, transportées sans flou (MacCormack) pour garder des bords nets.
-- **La goutte est un liquide** : elle vit dans son propre repère (1,5 hauteur d'écran) qui suit le curseur. Son liquide est entraîné vers la vitesse du repère, fort à l'avant, faible à l'arrière, si bien que l'arrière traîne et s'étire. Son contour (champ de phase d'Allen-Cahn) est transporté par le courant relatif. La tension de surface agit à toutes les échelles : les petites bosses rentrent et les filaments se rétractent (masque très flouté), la forme revient vers l'ellipse de mêmes moments, et un écoulement d'étirement inverse ramène cette ellipse vers le cercle. La surface est conservée. La surface, le centre et les moments d'inertie de la goutte sont calculés sur le GPU par mipmaps, sans relecture.
-- **Vers** : réaction-diffusion Gray-Scott en 32 bits, calculée dans le repère de la goutte. Les réglages changent avec l'état : vers, puis cellules serrées, puis perles. Comme les perles restent des perles avec les réglages des vers, le retour à la goutte corail passe par une courte phase de repousse. Près du bord, les vers deviennent des perles puis disparaissent, ce qui laisse un bord sombre.
-- **Une couleur par ver** : chaque ver reçoit une identité au hasard qui se propage le long de son cœur (la plus grande l'emporte), puis ses bords prennent l'identité du point le plus haut voisin. La couleur est tirée de cette identité. À chaque état, un front de recoloriage passe en taches sur la goutte et donne une nouvelle couleur à chaque cellule.
-- **Goutte rose** : elle repousse le motif autour d'elle par un déplacement qui conserve la surface, d'où les vers écrasés contre elle.
-- **Liquide** : les lignes lumineuses, les particules et les reflets de l'huile sont dessinés dans des coordonnées entraînées par le courant (deux jeux décalés, remis à zéro tour à tour), donc ils suivent le liquide et s'étirent avec lui.
-- **Rendu** : contours lissés en bicubique, vers bombés au liseré clair, contour noir, sillons bleu nuit avec un ménisque qui reflète le ciel en filets clairs, reflets d'un éclairage de studio (Fresnel), effet dôme au bord, grande ombre portée bleu-violet, nappes de liquides en relief, flou de mouvement, flou de profondeur, bloom.
+- **Goutte** : une tête et une queue de 7 nœuds simulées sur le processeur. La tête suit un ressort amorti vers le curseur, avec une vitesse limitée, un seuil d'accroche et un léger serpentement. Chaque nœud de la queue est tiré par celui de devant (longueur maximale) et rétracté vers lui par la tension de surface. Le rayon découle du volume, que la forme étirée répartit le long de la queue.
+- **Eau qui bouge** : la goutte, sa queue et ses perles sont dessinées en bosses lisses additionnées dans une texture flottante. Leur somme est seuillée comme des métaballes, d'où les ponts de liquide entre gouttes voisines ; le relief donne les normales.
+- **Gouttelettes posées** : trois couches procédurales, une gouttelette au plus par cellule, ajoutées au même relief. Une carte basse résolution dit où la surface a été essuyée ; chaque gouttelette réapparaît quand la carte dépasse son seuil.
+- **Rendu** : réfraction du fond selon la normale (image renversée), bord sombre, reflet spéculaire, lumière concentrée, buée qui floute le fond par mipmaps, vignettage léger.

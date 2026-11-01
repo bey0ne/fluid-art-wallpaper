@@ -1,8 +1,8 @@
 {
   "file": "index.html",
   "type": "web",
-  "title": "Fluide microscopique",
-  "description": "Une grosse goutte de liquide couverte de vers de peinture (corail, moutarde, olive) cernés de noir, séparés par des sillons bleus brillants. Elle suit la souris dans le décor : c'est une vraie simulation de fluide, donc elle se déforme, s'étire en traînée quand elle file, puis s'arrondit à nouveau sous l'effet de la tension de surface. Elle passe par les états de la vidéo : goutte corail, goutte rose et encre chocolat, encre rouge, huile ambrée.",
+  "title": "Goutte de pluie",
+  "description": "Une seule petite goutte d'eau court sur une surface mouillée et suit la souris. Elle a de l'inertie, s'étire en filet quand elle file et s'arrondit quand elle s'arrête. Elle avale les gouttelettes sur son passage et laisse derrière elle une traînée de petites perles. Les gouttelettes et la buée reviennent peu à peu. Fond abstrait aux couleurs réglables, ou ton image.",
   "preview": "preview.jpg",
   "tags": [
     "Abstract"
@@ -10,143 +10,112 @@
   "general": {
     "supportsaudioprocessing": false,
     "properties": {
-      "phase": {
-        "text": "État",
-        "type": "combo",
-        "value": "-1",
-        "options": [
-          {
-            "label": "Cycle automatique",
-            "value": "-1"
-          },
-          {
-            "label": "Goutte corail (sillons bleus)",
-            "value": "0"
-          },
-          {
-            "label": "Goutte rose et encre chocolat",
-            "value": "1"
-          },
-          {
-            "label": "Liquide rose, lignes lumineuses et encre rouge",
-            "value": "2"
-          },
-          {
-            "label": "Huile ambrée",
-            "value": "3"
-          }
-        ],
+      "dropsize": {
+        "text": "Taille de la goutte",
+        "type": "slider",
+        "min": 0.4,
+        "max": 2.5,
+        "value": 1,
+        "fraction": true,
+        "precision": 2,
         "order": 0
       },
-      "phaseduration": {
-        "text": "Durée de chaque état (s)",
-        "type": "slider",
-        "min": 4,
-        "max": 120,
-        "value": 15,
-        "fraction": false,
-        "order": 1
-      },
-      "mouseforce": {
-        "text": "Suivi de la souris (0 = la goutte dérive seule)",
+      "follow": {
+        "text": "Vitesse de la goutte (0 = elle ne bouge plus)",
         "type": "slider",
         "min": 0,
         "max": 2,
         "value": 1,
         "fraction": true,
         "precision": 2,
-        "order": 2
+        "order": 1
       },
-      "mouseink": {
-        "text": "Traînée d'encre derrière la goutte",
+      "beads": {
+        "text": "Perles laissées derrière la goutte",
         "type": "bool",
         "value": true,
+        "order": 2
+      },
+      "density": {
+        "text": "Densité des gouttelettes",
+        "type": "slider",
+        "min": 0,
+        "max": 2,
+        "value": 1,
+        "fraction": true,
+        "precision": 2,
         "order": 3
       },
-      "blobamount": {
-        "text": "Taille de la goutte",
+      "regrow": {
+        "text": "Retour des gouttelettes dans la traînée",
+        "type": "slider",
+        "min": 0.1,
+        "max": 4,
+        "value": 1,
+        "fraction": true,
+        "precision": 2,
+        "order": 4
+      },
+      "mist": {
+        "text": "Buée",
         "type": "slider",
         "min": 0,
         "max": 1,
         "value": 0.5,
         "fraction": true,
         "precision": 2,
-        "order": 4
-      },
-      "patternscale": {
-        "text": "Taille des vers",
-        "type": "slider",
-        "min": 0.8,
-        "max": 3,
-        "value": 1.5,
-        "fraction": true,
-        "precision": 1,
         "order": 5
       },
-      "speed": {
-        "text": "Vitesse",
-        "type": "slider",
-        "min": 0,
-        "max": 3,
-        "value": 1,
-        "fraction": true,
-        "precision": 2,
-        "order": 6
+      "palette": {
+        "text": "Couleurs du fond",
+        "type": "combo",
+        "value": "0",
+        "order": 6,
+        "options": [
+          {
+            "label": "Nuit bleue",
+            "value": "0"
+          },
+          {
+            "label": "Crépuscule",
+            "value": "1"
+          },
+          {
+            "label": "Forêt",
+            "value": "2"
+          },
+          {
+            "label": "Néon",
+            "value": "3"
+          },
+          {
+            "label": "Brume",
+            "value": "4"
+          },
+          {
+            "label": "Ma couleur",
+            "value": "5"
+          }
+        ]
       },
-      "droplets": {
-        "text": "Gouttes d'huile",
-        "type": "slider",
-        "min": 0,
-        "max": 1.5,
-        "value": 1,
-        "fraction": true,
-        "precision": 2,
+      "tint": {
+        "text": "Ma couleur (avec « Couleurs du fond : Ma couleur »)",
+        "type": "color",
+        "value": "0.30 0.50 0.95",
         "order": 7
       },
-      "motionblur": {
-        "text": "Flou de mouvement",
-        "type": "slider",
-        "min": 0,
-        "max": 2,
-        "value": 1,
-        "fraction": true,
-        "precision": 2,
+      "image": {
+        "text": "Image de fond (facultatif)",
+        "type": "file",
+        "fileType": "image",
+        "value": "",
         "order": 8
-      },
-      "camera": {
-        "text": "Mouvement de caméra",
-        "type": "slider",
-        "min": 0,
-        "max": 2,
-        "value": 1,
-        "fraction": true,
-        "precision": 2,
-        "order": 9
-      },
-      "dof": {
-        "text": "Flou de profondeur",
-        "type": "slider",
-        "min": 0,
-        "max": 2,
-        "value": 1,
-        "fraction": true,
-        "precision": 2,
-        "order": 10
-      },
-      "bloom": {
-        "text": "Halo lumineux",
-        "type": "slider",
-        "min": 0,
-        "max": 2,
-        "value": 1,
-        "fraction": true,
-        "precision": 2,
-        "order": 11
       },
       "quality": {
         "text": "Qualité",
         "type": "combo",
         "value": "-1",
+        "order": 9,
         "options": [
           {
             "label": "Auto (s'adapte à la carte graphique)",
@@ -164,8 +133,7 @@
             "label": "Haute",
             "value": "2"
           }
-        ],
-        "order": 12
+        ]
       }
     }
   }
