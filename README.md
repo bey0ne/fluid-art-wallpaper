@@ -1,4 +1,4 @@
-# Goutte microscopique
+# Goutte vivante
 
 Fond d'écran animé pour [Wallpaper Engine](https://www.wallpaperengine.io/). **Une seule petite goutte suit la souris**, et elle coule comme une goutte de pluie. Quand elle en touche une autre, elles fusionnent. Le thème de départ reprend le décor des films microscopiques de liquides de Kamil Czapiga : un liquide à motifs, avec des vers corail, moutarde et olive serrés dans un liquide bleu nuit. Trois autres thèmes sont au choix : une goutte de pluie sur une vitre la nuit, du mercure, du miel. Tout est calculé en temps réel en WebGL2 : aucune vidéo n'est utilisée.
 
