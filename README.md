@@ -43,7 +43,7 @@ La fusion suit ce qui se passe vraiment entre deux gouttes posées :
 
 ## Les décors
 
-Pour le thème Microscopique, quatre décors sont tirés des images de la vidéo :
+Pour le thème Microscopique, quatre décors sont recréés par le code d'après les images de la vidéo :
 
 - **Pêche** : un liquide jaune pêche avec une nappe brune.
 - **Bordeaux** : des encres orange et bordeaux.
