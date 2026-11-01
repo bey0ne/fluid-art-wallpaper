@@ -2,7 +2,7 @@
   "file": "index.html",
   "type": "web",
   "title": "Goutte microscopique",
-  "description": "Une seule petite goutte suit la souris en coulant comme une goutte de pluie : elle s'accroche, file en s'étirant en larme, tremble en s'arrêtant, et laisse derrière elle un filet qui se casse en perles. Quand elle touche une autre goutte, elles fusionnent pour de vrai : un pont de liquide s'ouvre, la petite se vide dans la grande, qui se bombe puis tremble. Quatre thèmes (le liquide à motifs de la vidéo, goutte de pluie sur une vitre la nuit, mercure, miel), plusieurs palettes de couleurs pour chacun et une couleur libre.",
+  "description": "Une seule petite goutte suit la souris en coulant comme une goutte de pluie : elle s'accroche, file en s'étirant en larme, tremble en s'arrêtant et laisse derrière elle un filet qui se casse en perles. Quand elle touche une autre goutte, elles fusionnent : un pont de liquide s'ouvre, la petite se vide dans la grande, qui se bombe puis tremble. Quatre thèmes au choix : Microscopique, Goutte de pluie, Mercure et Miel, chacun avec plusieurs palettes de couleurs et une couleur libre.",
   "preview": "preview.jpg",
   "tags": [
     "Abstract"
@@ -17,7 +17,7 @@
         "order": 0,
         "options": [
           {
-            "label": "Microscopique (la vidéo)",
+            "label": "Microscopique",
             "value": "0"
           },
           {
@@ -66,7 +66,7 @@
         "order": 2,
         "options": [
           {
-            "label": "Celles de la vidéo",
+            "label": "D'origine",
             "value": "0"
           },
           {
@@ -120,7 +120,7 @@
         "order": 4,
         "options": [
           {
-            "label": "Argent (mercure)",
+            "label": "Argent",
             "value": "0"
           },
           {
@@ -145,7 +145,7 @@
         "order": 5,
         "options": [
           {
-            "label": "Acacia (clair)",
+            "label": "Acacia",
             "value": "0"
           },
           {
@@ -153,7 +153,7 @@
             "value": "1"
           },
           {
-            "label": "Châtaignier (foncé)",
+            "label": "Châtaignier",
             "value": "2"
           },
           {
@@ -164,7 +164,7 @@
         "condition": "theme.value == 3"
       },
       "mycolor": {
-        "text": "Ma couleur (pour les palettes « Ma couleur »)",
+        "text": "Ma couleur",
         "type": "color",
         "value": "1 0.45 0.2",
         "order": 6
@@ -180,7 +180,7 @@
         "order": 7
       },
       "follow": {
-        "text": "Vitesse de la goutte (0 = elle ne bouge plus)",
+        "text": "Vitesse de la goutte",
         "type": "slider",
         "min": 0,
         "max": 2,
@@ -190,7 +190,7 @@
         "order": 8
       },
       "trail": {
-        "text": "Liquide laissé derrière la goutte (0 = aucun)",
+        "text": "Liquide laissé derrière la goutte",
         "type": "slider",
         "min": 0,
         "max": 2,
@@ -215,7 +215,7 @@
         "order": 11,
         "options": [
           {
-            "label": "Auto (s'adapte à la carte graphique)",
+            "label": "Auto",
             "value": "-1"
           },
           {

@@ -34,7 +34,7 @@ La fusion suit ce qui se passe vraiment entre deux gouttes posées :
 
 | Thème | Ce qu'on voit | Couleurs au choix |
 | --- | --- | --- |
-| **Microscopique** | Le liquide à motifs de la vidéo, sur l'un de ses quatre décors | Celles de la vidéo, Lagon, Néon, Ma couleur |
+| **Microscopique** | Le liquide à motifs de la vidéo, sur l'un de ses quatre décors | D'origine, Lagon, Néon, Ma couleur |
 | **Goutte de pluie** | Une goutte d'eau sur une vitre, la nuit. Des lumières floues sont derrière, et la vitre est couverte de gouttelettes. Chaque goutte est une lentille : on y voit les lumières nettes, réduites et à l'envers, avec un liseré sombre au bord. La goutte avale les gouttelettes qu'elle rencontre, et il en retombe de nouvelles. | Ville la nuit, Coucher de soleil, Forêt, Néon, Ma couleur |
 | **Mercure** | Un métal liquide sur une ardoise. C'est un miroir bombé, qui ne mouille pas : il ne laisse pas de filet. Quand il file vite, il sème de petites billes, qu'il peut ravaler. | Argent, Or, Cuivre, Ma couleur |
 | **Miel** | Du miel sur un marbre clair. Il est épais et lent, ne tremble presque pas, et laisse un long filet qui se casse tard. Plus il est épais, plus il est foncé, et son ombre est dorée. | Acacia, Ambré, Châtaignier, Ma couleur |
